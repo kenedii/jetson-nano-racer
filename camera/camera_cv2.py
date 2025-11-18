@@ -1,4 +1,5 @@
 # Functions to easily use the camera in OpenCV. Pass the OpenCV integer camera index as input for the 'camera' parameter.
+# These functions only support basic camera features and do not make use of the depth sensors.
 
 import cv2
 import os
