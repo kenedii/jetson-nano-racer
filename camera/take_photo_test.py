@@ -1,3 +1,5 @@
+# This code is meant for testing camera indexes in OpenCV to view the output. 
+# Use camera_cv2.py, realsense_cv2.py, or realsense_pyrealsense.py instead for functions to easily interact with the camera.
 import cv2
 
 cap =  cv2.VideoCapture(1)
