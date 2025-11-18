@@ -1,4 +1,6 @@
 # realsense_full.py
+# This code aims to provide an easy way to interface with the camera using PyRealSense2 as well as access depth data.
+
 import pyrealsense2 as rs
 import numpy as np
 import cv2
