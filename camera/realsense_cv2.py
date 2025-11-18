@@ -1,5 +1,6 @@
 # camera_utils.py
-# Pure OpenCV + V4L2 - RGB + IR + Depth on RealSense - NO non-ASCII chars
+# Pure OpenCV + V4L2 - RGB + IR + Depth on RealSense
+# This code aims to provide an easy way to interface with the camera using OpenCV as well as access depth data.
 import cv2
 import numpy as np
 
