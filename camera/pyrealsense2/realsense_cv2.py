@@ -1,5 +1,5 @@
 # camera_utils.py
-# Pure OpenCV + V4L2 - RGB + IR + Depth on RealSense - NO non-ASCII chars
+# Pure OpenCV + V4L2 - RGB + IR + Depth on RealSense
 import cv2
 import numpy as np
 
