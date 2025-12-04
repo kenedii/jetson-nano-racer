@@ -1,5 +1,5 @@
 """
-viewer.py
+frontend.py
 Streamlit app to browse RC car run folders, view frames, visualize controls,
 and delete bad frames (removes image file + CSV row).
 
