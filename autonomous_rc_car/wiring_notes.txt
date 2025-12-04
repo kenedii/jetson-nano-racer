@@ -1,0 +1,40 @@
+Autonomous RC Car with IMU-Enhanced Autonomy
+================================================
+
+Hardware wiring notes captured so far.
+
+Traxxas Receiver → Pololu RC Servo Multiplexer (Product 2806)
+-------------------------------------------------------------
+
+- CH1 → M1
+- CH2 → M2
+- CH3 → SEL
+
+Outputs from multiplexer:
+
+- OUT1 → Steering servo
+- OUT2 → ESC
+
+Adafruit 16-Channel PWM/Servo Driver (PCA9685, product 815)
+-----------------------------------------------------------
+
+Connections to Pololu multiplexer:
+
+- Channel 0 → S1 (steering PWM from Jetson)
+- Channel 1 → S2 (throttle/ESC PWM from Jetson)
+
+Connections to Jetson Nano header:
+
+- VCC → Jetson Nano 3.3V (Pin 1 or 17; user specified 3.3V pin)
+- SDA → Jetson Nano Pin 3 (I2C SDA)
+- SCL → Jetson Nano Pin 5 (I2C SCL)
+- GND → Jetson Nano GND (e.g., Pin 6/9/14/20/25/30/34/39)
+
+Perception & Compute
+--------------------
+
+- Compute: NVIDIA Jetson Nano (4GB)
+- Depth + RGB + IMU: Intel RealSense D435i
+- WiFi: TP-Link TL-WN725N USB adapter
+
+See README.md for more context.

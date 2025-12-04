@@ -1,0 +1,3 @@
+RealSense D435i  --->  Sensor Node  --->  Perception + Control  ---> Car Interface ---> LaTrax ESC + Steering Servo
+(IMU + RGBD)          (pyrealsense2        (lane net, depth,        (NvidiaRacecar
+                        + fusion)          IMU fusion, safety)       wrapper)
