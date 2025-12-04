@@ -15,7 +15,7 @@ from datetime import datetime
 import pygame
 from smbus2 import SMBus
 import cv2
-import realsense_full  # Your verified RealSense pipeline
+import realsense_full  # RealSense pipeline
 
 # ================= CONFIG =================
 class Config:
@@ -23,11 +23,12 @@ class Config:
     STEERING_CHANNEL = 0
     THROTTLE_CHANNEL = 1
     STEERING_AXIS = 0
-    THROTTLE_AXIS = 1
+    THROTTLE_AXIS = 1  # Default to left Y, will be overridden if mode 2
+    RIGHT_THROTTLE_AXIS = 4  # Right stick Y for separate mode
     PWM_FREQ = 50
     IMG_WIDTH = 160
     IMG_HEIGHT = 120
-    TARGET_FPS = 3
+    TARGET_FPS = 2
     DELETE_N_FRAMES = 50
     THROTTLE_MAX_SCALE = 0.25  # Max 30% of full speed
 
@@ -76,6 +77,23 @@ if pygame.joystick.get_count() == 0:
 joystick = pygame.joystick.Joystick(0)
 joystick.init()
 print(f"Joystick detected: {joystick.get_name()}")
+
+# ================= CONTROL MODE SELECTION =================
+print("\nChoose control mode:")
+print("1: Left joystick only (horizontal: steer, vertical: throttle)")
+print("2: Left joystick for steer (horizontal), Right joystick for throttle (vertical)")
+while True:
+    mode_choice = input("Enter 1 or 2: ").strip()
+    if mode_choice == '1':
+        cfg.THROTTLE_AXIS = 1
+        print("Selected Mode 1: Left joystick controls both steering and throttle.")
+        break
+    elif mode_choice == '2':
+        cfg.THROTTLE_AXIS = cfg.RIGHT_THROTTLE_AXIS
+        print("Selected Mode 2: Left joystick for steering, Right joystick for throttle.")
+        break
+    else:
+        print("Invalid choice. Please enter 1 or 2.")
 
 # ================= MULTI-SESSION SETUP =================
 BASE_RUN_DIR = "runs_rgb_depth"
