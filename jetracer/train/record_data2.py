@@ -76,6 +76,9 @@ class Config:
     # Safety scaling (set to safe defaults; change if needed)
     THROTTLE_MAX_SCALE = 0.30  # 30% of full travel
     STEERING_MAX_SCALE = 1.00  # 100% steering
+    
+    # Steering Gamma for fine control (1.0 = linear, 2.0 = quadratic)
+    STEERING_GAMMA = 2.5
 
     # Deadzone to ignore tiny stick/trigger noise
     AXIS_DEADZONE = 0.03
@@ -313,7 +316,13 @@ try:
         # STEERING (left stick X) - invert to match mapping
         raw_steer = -joystick.get_axis(cfg.STEERING_AXIS)
         raw_steer = apply_deadzone(raw_steer)
-        steer = max(min(raw_steer, cfg.STEERING_MAX_SCALE), -cfg.STEERING_MAX_SCALE)
+        
+        # Apply Gamma Curve for fine control
+        # steer = sign(raw) * (|raw| ^ gamma)
+        sign = 1 if raw_steer >= 0 else -1
+        steer_curved = sign * (abs(raw_steer) ** cfg.STEERING_GAMMA)
+        
+        steer = max(min(steer_curved, cfg.STEERING_MAX_SCALE), -cfg.STEERING_MAX_SCALE)
 
         # THROTTLE selection by mode
         if mode == 3:
@@ -381,9 +390,7 @@ finally:
     neutralize()
     pygame.quit()
     try:
-        if hasattr(realsense_full, "pipeline") and realsense_full.pipeline:
-            realsense_full.pipeline.stop()
-            print("[RealSense] Pipeline stopped.")
+        realsense_full.stop_pipeline()
     except Exception as e:
         print(f"[RealSense stop error] {e}")
     print(f"\nDATA SAVED -> {RUN_DIR}")

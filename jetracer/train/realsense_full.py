@@ -2,6 +2,7 @@
 import pyrealsense2 as rs
 import numpy as np
 import cv2
+import time
 
 # Global objects - created once
 pipeline = None
@@ -62,6 +63,20 @@ def start_pipeline():
         # Start background thread
         t = threading.Thread(target=camera_worker, daemon=True)
         t.start()
+
+def stop_pipeline():
+    global pipeline, align
+    stop_event.set()
+    # Give the thread a moment to exit the loop
+    time.sleep(0.5)
+    if pipeline:
+        try:
+            pipeline.stop()
+        except Exception as e:
+            print(f"[RealSense] Error stopping pipeline: {e}")
+        pipeline = None
+        align = None
+    print("[RealSense] Pipeline stopped.")
 
 
 # --------------------- RGB ---------------------
