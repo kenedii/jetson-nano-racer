@@ -13,11 +13,47 @@ import csv
 import time
 import threading
 import atexit
+import queue
 from datetime import datetime
 import pygame
 from smbus2 import SMBus
 import cv2
 import realsense_full  # RealSense pipeline (your module)
+
+# ================= ASYNC SAVER =================
+class AsyncSaver:
+    def __init__(self):
+        self.queue = queue.Queue()
+        self.running = True
+        self.thread = threading.Thread(target=self._worker, daemon=True)
+        self.thread.start()
+
+    def _worker(self):
+        while self.running:
+            try:
+                item = self.queue.get(timeout=0.1)
+                if item is None:
+                    continue
+                
+                # Unpack
+                func, args = item
+                try:
+                    func(*args)
+                except Exception as e:
+                    print(f"[Saver Error] {e}")
+                
+                self.queue.task_done()
+            except queue.Empty:
+                continue
+
+    def save(self, func, *args):
+        self.queue.put((func, args))
+
+    def stop(self):
+        self.running = False
+        self.thread.join()
+
+saver = AsyncSaver()
 
 # ================= CONFIG =================
 class Config:
@@ -161,6 +197,14 @@ writer.writerow(["timestamp","steer_us","throttle_us","steer_norm","throttle_nor
 frame_idx = 0
 
 # ================= HELPERS =================
+def save_task(rgb, rgb_path, row_data, writer_obj, csv_file_obj):
+    try:
+        cv2.imwrite(rgb_path, rgb)
+        writer_obj.writerow(row_data)
+        csv_file_obj.flush()
+    except Exception as e:
+        print(f"Save error: {e}")
+
 def pwm_to_norm(us):
     return (us - 1500) / 500.0
 
@@ -309,11 +353,15 @@ try:
                 rgb, depth_front = get_rgb_and_front_depth()
                 if rgb is not None:
                     rgb_path = os.path.join(RUN_DIR, f"rgb_{frame_idx:05d}.png")
-                    cv2.imwrite(rgb_path, rgb)
-                    writer.writerow([time.time(), steer_us, throttle_us,
-                                     pwm_to_norm(steer_us), pwm_to_norm(throttle_us),
-                                     depth_front, rgb_path])
-                    csv_file.flush()
+                    
+                    # Prepare data for async save
+                    row_data = [time.time(), steer_us, throttle_us,
+                                pwm_to_norm(steer_us), pwm_to_norm(throttle_us),
+                                depth_front, rgb_path]
+                    
+                    # Offload to thread
+                    saver.save(save_task, rgb, rgb_path, row_data, writer, csv_file)
+                    
                     frame_idx += 1
                     last_save_time = now
                     print(f"\rFrame {frame_idx:05d} | S {pwm_to_norm(steer_us):+0.3f} | "
@@ -325,6 +373,7 @@ except KeyboardInterrupt:
     print("\nStopping...")
 
 finally:
+    saver.stop()
     try:
         csv_file.close()
     except Exception:

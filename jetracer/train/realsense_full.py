@@ -6,6 +6,41 @@ import cv2
 # Global objects - created once
 pipeline = None
 align = None
+latest_frames = {"rgb": None, "depth": None, "ir": None}
+import threading
+frame_lock = threading.Lock()
+stop_event = threading.Event()
+
+def camera_worker():
+    global latest_frames
+    while not stop_event.is_set():
+        try:
+            frames = pipeline.wait_for_frames(timeout_ms=2000)
+            aligned = align.process(frames)
+            
+            # Get frames
+            color_frame = aligned.get_color_frame()
+            depth_frame = aligned.get_depth_frame()
+            # IR frame (index 1)
+            ir_frame = aligned.get_infrared_frame(1)
+
+            if color_frame and depth_frame:
+                # Convert to numpy arrays
+                rgb = np.asanyarray(color_frame.get_data())
+                depth = np.asanyarray(depth_frame.get_data())
+                
+                ir = None
+                if ir_frame:
+                    ir_data = np.asanyarray(ir_frame.get_data())
+                    ir = cv2.cvtColor(ir_data, cv2.COLOR_GRAY2BGR)
+
+                # Update global state safely
+                with frame_lock:
+                    latest_frames["rgb"] = rgb
+                    latest_frames["depth"] = depth
+                    latest_frames["ir"] = ir
+        except Exception as e:
+            print(f"[RealSense Thread Error] {e}")
 
 def start_pipeline():
     global pipeline, align
@@ -14,27 +49,28 @@ def start_pipeline():
         config = rs.config()
 
         # Enable the three streams we need
-        config.enable_stream(rs.stream.color, 1280, 720, rs.format.rgb8, 30)
-        # Note: '1' is the index for the left IR camera on most D400 series
-        config.enable_stream(rs.stream.infrared, 1, 1280, 720, rs.format.y8, 30)
-        config.enable_stream(rs.stream.depth, 1280, 720, rs.format.z16, 30)
+        config.enable_stream(rs.stream.color, 640, 480, rs.format.rgb8, 30)
+        config.enable_stream(rs.stream.infrared, 1, 640, 480, rs.format.y8, 30)
+        config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
 
         pipeline.start(config)
 
         # FIX: Align depth and IR to the color image by passing rs.stream.color
         align = rs.align(rs.stream.color)
         print("[RealSense] Pipeline started - RGB + IR + Depth ready")
+        
+        # Start background thread
+        t = threading.Thread(target=camera_worker, daemon=True)
+        t.start()
 
 
 # --------------------- RGB ---------------------
 def get_rgb_image():
     start_pipeline()
-    frames = pipeline.wait_for_frames()
-    aligned = align.process(frames)
-    color_frame = aligned.get_color_frame()
-    if not color_frame:
-        return None
-    return np.asanyarray(color_frame.get_data())  # RGB, shape (720,1280,3)
+    with frame_lock:
+        if latest_frames["rgb"] is None:
+            return None
+        return latest_frames["rgb"].copy()
 
 
 def save_rgb_image(filename):
@@ -50,15 +86,10 @@ def save_rgb_image(filename):
 # --------------------- IR (dots) ---------------------
 def get_ir_image():
     start_pipeline()
-    frames = pipeline.wait_for_frames()
-    aligned = align.process(frames)
-    # The left IR stream index is 1, as enabled in config.
-    ir_frame = aligned.get_infrared_frame(1)
-    if not ir_frame:
-        return None
-    ir = np.asanyarray(ir_frame.get_data())
-    # Convert single-channel IR (grayscale) to 3-channel for consistent model input/saving
-    return cv2.cvtColor(ir, cv2.COLOR_GRAY2BGR)
+    with frame_lock:
+        if latest_frames["ir"] is None:
+            return None
+        return latest_frames["ir"].copy()
 
 
 def save_ir_image(filename):
@@ -73,12 +104,10 @@ def save_ir_image(filename):
 # --------------------- DEPTH ---------------------
 def get_depth_image():
     start_pipeline()
-    frames = pipeline.wait_for_frames()
-    aligned = align.process(frames)
-    depth_frame = aligned.get_depth_frame()
-    if not depth_frame:
-        return None
-    return np.asanyarray(depth_frame.get_data())  # uint16 in millimeters
+    with frame_lock:
+        if latest_frames["depth"] is None:
+            return None
+        return latest_frames["depth"].copy()
 
 
 def save_depth_image(filename, colored=True):
