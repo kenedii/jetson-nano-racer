@@ -4,3 +4,5 @@ It will save the flattened RGB, IR (2 channels), and depth data (entire depth pi
 
 record_data2.py: 
 The first script was causing the XBOX Controller's inputs to be sent to the car with a 4-5 second delay due to the large amount of data being processed, even with only 2 FPS. This script only collects the RGB image along with the depth in front of camera float value in centimetres to reduce the amount of data being processed by the Jetson every second. Using this script will considerably reduce the input delay between the steering/acceleration controls from the XBOX Controller and the RC Car while collecting training data driving the car.
+
+realsense_full.py: used by both record data scripts to interact with the realsense camera to obtain RGB image/IR image/depth data.
