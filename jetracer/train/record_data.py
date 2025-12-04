@@ -4,138 +4,102 @@
 # This script allows the user to drive the car around the track using the XBOX controller.
 # It will save the flattened RGB, IR, and depth data as independent variables, and the steering and acceleration values are the target variables of the dataset.
 # This data can be used to predict steering and acceleration values when given an image of what the car sees.
-"""
-Human driving dataset collection for LaTrax + PCA9685 + RealSense
-Uses Xbox controller and working RealSense pipeline.
-Stores flattened RGB, IR, and depth images as features.
-"""
-
+import pyrealsense2 as rs
 import numpy as np
+import pygame
+import time
 import os
 import csv
-import time
 import threading
 from datetime import datetime
-import pygame
-from smbus2 import SMBus
-import cv2
-import realsense_full  # Use your verified RealSense pipeline
+import Jetson.GPIO as GPIO
 
 # ================= CONFIG =================
-class Config:
-    PCA_ADDR = 0x40
-    STEERING_CHANNEL = 0
-    THROTTLE_CHANNEL = 1
-    STEERING_AXIS = 0
-    THROTTLE_AXIS = 1
-    PWM_FREQ = 50
+STEERING_PIN = 0  # Not used, car controlled via PCA9685 directly
+THROTTLE_PIN = 1  # Not used
+TARGET_FPS = 8
+RUN_DIR = f"runs/run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+DELETE_N_FRAMES = 50
 
-    TARGET_FPS = 15          # Samples per second
-    RUN_DIR = f"runs/run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    DELETE_N_FRAMES = 50
+os.makedirs(RUN_DIR, exist_ok=True)
+IMG_DIR = os.path.join(RUN_DIR, "frames")
+os.makedirs(IMG_DIR, exist_ok=True)
 
-cfg = Config()
-os.makedirs(cfg.RUN_DIR, exist_ok=True)
+CSV_PATH = os.path.join(RUN_DIR, "labels.csv")
+csv_file = open(CSV_PATH, "w", newline="")
+writer = csv.writer(csv_file)
+writer.writerow(["filename", "steer", "throttle"])
 
-# ================= PCA9685 =================
-class PCA9685:
-    def __init__(self, bus=1, address=cfg.PCA_ADDR):
-        self.bus = SMBus(bus)
-        self.address = address
-        self.set_pwm_freq(cfg.PWM_FREQ)
+# ================== REALSENSE ==================
+pipeline = rs.pipeline()
+config = rs.config()
+config.enable_stream(rs.stream.color, 640, 480, rs.format.rgb8, TARGET_FPS)
+config.enable_stream(rs.stream.infrared, 1, 640, 480, rs.format.y8, TARGET_FPS)
+config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, TARGET_FPS)
 
-    def set_pwm_freq(self, freq_hz):
-        prescaleval = 25000000.0 / 4096 / freq_hz - 1
-        prescale = int(prescaleval + 0.5)
-        self.bus.write_byte_data(self.address, 0x00, 0x10)
-        self.bus.write_byte_data(self.address, 0xFE, prescale)
-        self.bus.write_byte_data(self.address, 0x00, 0x80)
+pipeline.start(config)
+align = rs.align(rs.stream.color)
 
-    def set_pwm(self, channel, on, off):
-        self.bus.write_byte_data(self.address, 0x06 + 4*channel, on & 0xFF)
-        self.bus.write_byte_data(self.address, 0x07 + 4*channel, on >> 8)
-        self.bus.write_byte_data(self.address, 0x08 + 4*channel, off & 0xFF)
-        self.bus.write_byte_data(self.address, 0x09 + 4*channel, off >> 8)
+latest_frames = {"rgb": None, "ir": None, "depth": None}
+lock = threading.Lock()
 
-    def set_us(self, channel, microseconds):
-        pulse_length = 1000000 / cfg.PWM_FREQ / 4096
-        pulse = int(microseconds / pulse_length)
-        self.set_pwm(channel, 0, pulse)
+def camera_thread():
+    global latest_frames
+    while True:
+        frames = pipeline.wait_for_frames()
+        aligned = align.process(frames)
+        color = aligned.get_color_frame()
+        depth = aligned.get_depth_frame()
+        ir = aligned.get_infrared_frame(1)
+        if color and depth and ir:
+            with lock:
+                latest_frames["rgb"] = np.asanyarray(color.get_data())
+                latest_frames["depth"] = np.asanyarray(depth.get_data())
+                latest_frames["ir"] = np.asanyarray(ir.get_data())
 
-pca = PCA9685()
-STEERING_CENTER = 1500
-THROTTLE_CENTER = 1500
-STEERING_MAX = 2000
-STEERING_MIN = 1000
-THROTTLE_MAX = 2000
-THROTTLE_MIN = 1000
-pca.set_us(cfg.STEERING_CHANNEL, STEERING_CENTER)
-pca.set_us(cfg.THROTTLE_CHANNEL, THROTTLE_CENTER)
+threading.Thread(target=camera_thread, daemon=True).start()
 
-# ================= PYGAME =================
+# ================== JOYSTICK ==================
 pygame.init()
 pygame.joystick.init()
 if pygame.joystick.get_count() == 0:
-    raise Exception("No joystick detected! Connect Xbox controller.")
+    raise Exception("No joystick detected!")
 joystick = pygame.joystick.Joystick(0)
 joystick.init()
-print(f"Joystick detected: {joystick.get_name()}")
 
-# ================= HELPERS =================
-def pwm_to_norm(us):
-    return (us - 1500) / 500.0
+# Map left stick for steering (X axis) and throttle (Y axis)
+# Reverse values as needed
+def get_controller_input():
+    pygame.event.pump()
+    steer = joystick.get_axis(0)  # Left stick horizontal
+    throttle = -joystick.get_axis(1)  # Left stick vertical (up positive)
+    return steer, throttle
 
-def get_flattened_images():
-    rgb = realsense_full.get_rgb_image()
-    ir = realsense_full.get_ir_image()
-    depth = realsense_full.get_depth_image()
-    if rgb is None or ir is None or depth is None:
-        return None, None, None
-    rgb_flat = cv2.resize(rgb, (224,224)).flatten()
-    ir_flat = cv2.resize(ir, (224,224)).flatten()
-    depth_flat = cv2.resize(depth, (224,224)).flatten()
-    return rgb_flat, ir_flat, depth_flat
+# ================== PCA9685 / Car Control ==================
+# Use your existing PCA9685 class or methods here to send PWM signals
+# For demonstration, we just print values
 
-# ================= DATASET SETUP =================
-csv_path = os.path.join(cfg.RUN_DIR, "dataset.csv")
-csv_file = open(csv_path, "w", newline="")
-writer = csv.writer(csv_file)
-header = ["timestamp","steer_us","throttle_us","steer_norm","throttle_norm","rgb_flat","depth_flat","ir_flat"]
-writer.writerow(header)
-
-# Instructions file
-with open(os.path.join(cfg.RUN_DIR,"README.txt"),"w") as f:
-    f.write(
-        "Dataset instructions:\n"
-        "- Features: flattened RGB (224x224x3), depth (224x224), IR (224x224)\n"
-        "- Targets: steering (us & normalized), throttle (us & normalized)\n"
-        "- Left stick: horizontal=steering, vertical=forward/reverse\n"
-        "- Pause collection: ENTER\n"
-        "- Delete last 50 frames: BACKSPACE\n"
-        "- Exit: Ctrl+C\n"
-        f"- CSV saved at: {csv_path}\n"
-    )
-
-# ================= INPUT THREAD =================
-frame_idx = 0
+# ================== MAIN LOOP ==================
 recording = False
-last_save_time = 0
-MIN_CHANGE_US = 15
-last_steer = STEERING_CENTER
-last_throttle = THROTTLE_CENTER
+frame_idx = 0
+last_time = 0
 
 def delete_last_n(n):
     global frame_idx
-    if frame_idx == 0:
-        print("\nNothing to delete")
-        return
     n = min(n, frame_idx)
-    with open(csv_path,'r') as f:
+    if n <= 0:
+        print("Nothing to delete")
+        return
+    with open(CSV_PATH, "r") as f:
         lines = f.readlines()
-    with open(csv_path,'w') as f:
+    with open(CSV_PATH, "w") as f:
         f.writelines(lines[:-n])
+    for i in range(frame_idx - n, frame_idx):
+        path = os.path.join(IMG_DIR, f"{i:06d}.npz")
+        if os.path.exists(path):
+            os.remove(path)
     frame_idx -= n
-    print(f"\nDeleted last {n} frames -> now at {frame_idx}")
+    print(f"Deleted last {n} frames, now at {frame_idx}")
 
 def input_thread():
     global recording
@@ -143,79 +107,66 @@ def input_thread():
         key = input()
         if key == "":
             recording = not recording
-            print(f"\n>>> {'RECORDING' if recording else 'PAUSED'} ({cfg.TARGET_FPS} FPS)")
-        elif key in ("\x08","\x7f","\b"):
-            delete_last_n(cfg.DELETE_N_FRAMES)
+            print(f"{'RECORDING' if recording else 'PAUSED'}")
+        elif key in ("\x08", "\x7f", "\b"):
+            delete_last_n(DELETE_N_FRAMES)
 
 threading.Thread(target=input_thread, daemon=True).start()
 
-# ================= TEST CAMERA & CONTROLS =================
-print("\n--- TESTING CAMERA & CAR CONTROLS ---")
-rgb_flat, ir_flat, depth_flat = get_flattened_images()
-if rgb_flat is not None:
-    print(f"RGB flat length: {len(rgb_flat)}, IR flat length: {len(ir_flat)}, Depth flat length: {len(depth_flat)}")
-else:
-    print("ERROR: Could not retrieve camera frames!")
+print("\n--- LOW-LATENCY DATA COLLECTION ---")
+print("Controls:")
+print("   ENTER      -> Start / Pause")
+print("   BACKSPACE  -> Delete last 50 frames")
+print("Ctrl+C to quit\n")
 
-# Test car controls
-pygame.event.pump()
-steer = -joystick.get_axis(cfg.STEERING_AXIS)
-throttle = -joystick.get_axis(cfg.THROTTLE_AXIS)
-steer_us = int(STEERING_CENTER + steer*(STEERING_MAX - STEERING_CENTER))
-throttle_us = int(THROTTLE_CENTER + throttle*(THROTTLE_MAX - THROTTLE_CENTER))
-pca.set_us(cfg.STEERING_CHANNEL, steer_us)
-pca.set_us(cfg.THROTTLE_CHANNEL, throttle_us)
-print("OK – Car controls working\n")
-print("--- CAMERA AND CONTROLS TEST COMPLETE ---\n")
-
-# ================= MAIN DATA COLLECTION LOOP =================
-print("Controls:\nENTER -> Start/Pause\nBACKSPACE -> Delete last 50 frames\nCtrl+C -> Quit\n")
 try:
     while True:
-        pygame.event.pump()
-        if not recording:
-            time.sleep(0.1)
-            continue
         now = time.time()
-        if now - last_save_time < (1.0 / cfg.TARGET_FPS):
+        if not recording or now - last_time < 1.0 / TARGET_FPS:
             time.sleep(0.01)
             continue
 
-        steer = -joystick.get_axis(cfg.STEERING_AXIS)
-        throttle_axis = -joystick.get_axis(cfg.THROTTLE_AXIS)
-        steer_us = int(STEERING_CENTER + steer*(STEERING_MAX - STEERING_CENTER))
-        throttle_us = int(THROTTLE_CENTER + throttle_axis*(THROTTLE_MAX - THROTTLE_CENTER))
-        pca.set_us(cfg.STEERING_CHANNEL, steer_us)
-        pca.set_us(cfg.THROTTLE_CHANNEL, throttle_us)
+        # ================= CONTROLLER =================
+        steer, throttle = get_controller_input()
 
-        if abs(steer_us-last_steer)<MIN_CHANGE_US and abs(throttle_us-last_throttle)<MIN_CHANGE_US:
-            continue
-        last_steer = steer_us
-        last_throttle = throttle_us
+        # TODO: Replace this with actual PCA9685 car control
+        print(f"Steer: {steer:+.2f} | Throttle: {throttle:+.2f}", end="\r")
 
-        rgb_flat, ir_flat, depth_flat = get_flattened_images()
-        if rgb_flat is None:
+        # ================= CAMERA =================
+        with lock:
+            rgb = latest_frames["rgb"]
+            depth = latest_frames["depth"]
+            ir = latest_frames["ir"]
+        if rgb is None or depth is None or ir is None:
             continue
 
-        writer.writerow([
-            time.time(), steer_us, throttle_us,
-            pwm_to_norm(steer_us), pwm_to_norm(throttle_us),
-            rgb_flat.tolist(), depth_flat.tolist(), ir_flat.tolist()
-        ])
+        # ================= SAVE =================
+        fname = f"{frame_idx:06d}.npz"
+        np.savez_compressed(os.path.join(IMG_DIR, fname),
+                            rgb=rgb, depth=depth, ir=ir)
+        writer.writerow([fname, steer, throttle])
         csv_file.flush()
+
         frame_idx += 1
-        last_save_time = now
-        print(f"\rFrame {frame_idx:05d} | S {pwm_to_norm(steer_us):+0.3f} | T {pwm_to_norm(throttle_us):+0.3f}", end="")
+        last_time = now
 
 except KeyboardInterrupt:
     print("\nStopping...")
 
 finally:
+    pipeline.stop()
     csv_file.close()
-    pca.set_us(cfg.STEERING_CHANNEL, STEERING_CENTER)
-    pca.set_us(cfg.THROTTLE_CHANNEL, THROTTLE_CENTER)
     pygame.quit()
-    if realsense_full.pipeline:
-        realsense_full.pipeline.stop()
-        print("[RealSense] Pipeline stopped.")
-    print(f"\nDATA SAVED -> {cfg.RUN_DIR}")
+    print(f"DATA SAVED -> {RUN_DIR}")
+
+    # Write dataset info
+    with open(os.path.join(RUN_DIR, "README.txt"), "w") as f:
+        f.write("""LOW-LATENCY DATASET
+Features: rgb (640x480x3), depth (640x480), ir (640x480)
+Target: steering [-1,1], throttle [-1,1]
+Instructions:
+- Use the Xbox controller left stick for steering and throttle.
+- Press ENTER to start/pause recording.
+- Press BACKSPACE to delete last 50 frames.
+- Process raw .npz files on a more powerful computer for training.
+""")
