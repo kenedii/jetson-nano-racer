@@ -4,7 +4,7 @@ Streamlit app to browse RC car run folders, view frames, visualize controls,
 delete bad frames, and bulk-remove frames where throttle_norm == 0.
 
 Run:
-    streamlit run viewer.py
+    streamlit run frontend.py
 """
 
 import os
@@ -30,7 +30,7 @@ def load_run_folders(root_dir: str):
     """Return sorted list of subfolders starting with 'run_' in root_dir."""
     if not os.path.isdir(root_dir):
         return []
-    return sorted([d for d in os.listdir(root_dir) if d.startswith("run_")])
+    return sorted([d for d in os.listdir(root_dir) if d.startswith("run_") and os.path.isdir(os.path.join(root_dir, d))])
 
 
 def load_dataset(run_path: str):
@@ -44,62 +44,70 @@ def load_dataset(run_path: str):
 
 
 def resolve_image_path(root_folder: str, raw_path: str) -> str:
-    """Normalize CSV image paths, safely resolving Windows/Linux inversions."""
+    """Normalize CSV image paths, safely resolving Windows/Linux inversions and avoiding double-root."""
     if raw_path is None:
         return ""
 
     p = str(raw_path).strip()
-    p_forward = p.replace("\\", "/")
+    if p == "":
+        return ""
 
-    # If CSV path is absolute
+    # If path is absolute already, normalize and return
     if os.path.isabs(p):
         return os.path.normpath(p)
 
-    # Root dir base name
+    # Normalize slashes for checking
+    p_forward = p.replace("\\", "/")
+
+    # Root dir base name (example: 'runs_rgb_depth')
     root_base = os.path.basename(root_folder).replace("\\", "/")
 
-    # If CSV path already includes root base (avoid double-joining)
+    # If CSV path already begins with the root base (avoid duplicate join)
     if p_forward.startswith(root_base + "/"):
+        # Join with parent of root_folder
         parent = os.path.dirname(root_folder)
-        candidate = os.path.join(parent, *p_forward.split("/"))
-        candidate = os.path.normpath(candidate)
+        candidate = os.path.normpath(os.path.join(parent, *p_forward.split("/")))
         if os.path.exists(candidate):
             return candidate
-
+        # fallback to joining with root_folder
         alt = os.path.normpath(os.path.join(root_folder, *p_forward.split("/")))
         if os.path.exists(alt):
             return alt
-
         return candidate
 
-    # Typical: join with root folder
+    # Typical path: relative to selected root_folder
     candidate = os.path.normpath(os.path.join(root_folder, *p_forward.split("/")))
     if os.path.exists(candidate):
         return candidate
 
-    # Try cwd
+    # Try as relative to current working directory
     cwd_candidate = os.path.normpath(os.path.join(os.getcwd(), *p_forward.split("/")))
     if os.path.exists(cwd_candidate):
         return cwd_candidate
 
+    # Final fallback: return candidate (even if doesn't exist) so caller can report missing
     return candidate
 
 
 def delete_frame_and_image(df: pd.DataFrame, csv_path: str, index_to_delete: int, root_folder: str):
-    """Delete image file and CSV row."""
+    """Delete image file and CSV row. Returns updated df."""
     if index_to_delete < 0 or index_to_delete >= len(df):
         return df
 
     row = df.iloc[index_to_delete]
+
+    # support several column name variants
     possible_keys = ["rgb_path", "rgbpath", "image_path", "image"]
     rgb_key = next((k for k in possible_keys if k in df.columns), None)
 
+    # If no image column found, just remove row and save CSV
     if rgb_key is None:
         df = df.drop(index_to_delete).reset_index(drop=True)
         df.to_csv(csv_path, index=False)
         return df
 
-    img_full = resolve_image_path(root_folder, row[rgb_key])
+    raw_img = row[rgb_key]
+    img_full = resolve_image_path(root_folder, raw_img)
 
     try:
         if img_full and os.path.exists(img_full):
@@ -113,14 +121,18 @@ def delete_frame_and_image(df: pd.DataFrame, csv_path: str, index_to_delete: int
 
 
 def steering_visualization(steer_norm: float) -> str:
-    """Simple directional label."""
+    """
+    Interpret steer_norm so that:
+      - positive steer_norm => LEFT
+      - negative steer_norm => RIGHT
+    """
     try:
         s = float(steer_norm)
     except Exception:
         return "CENTER"
-    if s < -0.05:
+    if s > 0.05:
         return "LEFT"
-    elif s > 0.05:
+    elif s < -0.05:
         return "RIGHT"
     return "CENTER"
 
@@ -130,7 +142,10 @@ def steering_visualization(steer_norm: float) -> str:
 # -------------------------
 
 def remove_zero_accel_frames(root_folder: str):
-    """Delete all frames with throttle_norm == 0 in ALL run_* folders."""
+    """
+    Delete all frames with throttle_norm == 0 in ALL run_* folders.
+    Returns a summary list of tuples: (run_name, before_count, after_count, removed_count)
+    """
     runs = load_run_folders(root_folder)
     summary = []
 
@@ -141,20 +156,39 @@ def remove_zero_accel_frames(root_folder: str):
             continue
 
         if "throttle_norm" not in df.columns:
+            summary.append((run, len(df), len(df), 0))
             continue
 
         before = len(df)
+        # indices to delete (list so we can reverse delete)
         to_delete = df[df["throttle_norm"] == 0].index.tolist()
 
-        count_removed = 0
-
+        removed = 0
+        # iterate reversed so indices remain valid as we drop rows
         for idx in reversed(to_delete):
+            # delete both file and row
             df = delete_frame_and_image(df, csv_path, idx, root_folder)
-            count_removed += 1
+            removed += 1
 
-        summary.append((run, before, before - count_removed, count_removed))
+        after = len(df)
+        summary.append((run, before, after, removed))
 
     return summary
+
+
+# -------------------------
+# Helper: Count total frames across all runs
+# -------------------------
+def count_total_frames(root_folder: str) -> int:
+    total = 0
+    runs = load_run_folders(root_folder)
+    for run in runs:
+        run_path = os.path.join(root_folder, run)
+        df, _ = load_dataset(run_path)
+        if df is None:
+            continue
+        total += len(df)
+    return total
 
 
 # -------------------------
@@ -164,17 +198,24 @@ st.title("📊 RC Car Dataset Viewer & Cleaner")
 
 root_folder = st.text_input("Root folder containing run_YYYYMMDD_HHMMSS folders (full path):")
 
-# -------------------------
+# Show total frames across all runs (if folder valid)
+if root_folder and os.path.isdir(root_folder):
+    total_frames = count_total_frames(root_folder)
+    st.markdown(f"**Total Frames Across All Runs:** {total_frames}")
+
+st.markdown("---")
+
 # Bulk Remove Zero Accel
-# -------------------------
 if root_folder and os.path.isdir(root_folder):
     st.markdown("### 🧹 Bulk Cleanup Tool")
     if st.button("🔥 Remove ALL frames with throttle_norm == 0 (across ALL runs)"):
         summary = remove_zero_accel_frames(root_folder)
-
         st.success("Bulk cleanup complete.")
         for run, before, after, removed in summary:
             st.write(f"**{run}** — {before} → {after} (removed {removed})")
+        # refresh total
+        total_frames = count_total_frames(root_folder)
+        st.write(f"Updated total frames: **{total_frames}**")
 
 st.markdown("---")
 
@@ -257,7 +298,7 @@ if root_folder:
         raw_img_path = row[image_col] if image_col else ""
         img_full_path = resolve_image_path(root_folder, raw_img_path)
 
-        # Wider image
+        # Wider image column to restore larger image display
         img_col, info_col = st.columns([4, 2])
 
         if not img_full_path or not os.path.exists(img_full_path):
@@ -285,6 +326,16 @@ if root_folder:
         except:
             info_col.progress(0.0)
 
+        # Fixed left/right visualization (interpreting positive = LEFT, negative = RIGHT)
+        info_col.markdown("**Steering**")
+        # Now positive steer_norm -> left bar, negative -> right bar
+        left_strength = max(0.0, float(steer_norm))   # positive => left
+        right_strength = max(0.0, -float(steer_norm))  # negative => right
+
+        # Show left then right so user reads left->right naturally
+        info_col.progress(left_strength, text="Left Turn")
+        info_col.progress(right_strength, text="Right Turn")
+
         steer_label = steering_visualization(steer_norm)
         if steer_label == "LEFT":
             info_col.write("**Steering:** ⬅️ LEFT")
@@ -304,6 +355,7 @@ if root_folder:
                 st.session_state.idx = 0
             else:
                 st.session_state.idx = min(idx, new_len - 1)
+            # update top total by rerunning
             st.experimental_rerun()
 
         st.markdown("---")
