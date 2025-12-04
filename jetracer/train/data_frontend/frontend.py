@@ -1,14 +1,12 @@
 """
 frontend.py
 Streamlit app to browse RC car run folders, view frames, visualize controls,
-and delete bad frames (removes image file + CSV row).
-
-This version fixes Windows path issues and prevents doubling the run folder
-when CSV paths already include the run folder name.
+delete bad frames, and bulk-remove frames where throttle_norm == 0.
 
 Run:
     streamlit run viewer.py
 """
+
 import os
 import streamlit as st
 import pandas as pd
@@ -22,21 +20,21 @@ st.set_page_config(page_title="RC Car Dataset Viewer", layout="wide")
 # -------------------------
 
 def normalize_df_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Strip whitespace from column names to avoid KeyErrors from trailing spaces."""
+    """Strip whitespace from column names to avoid KeyErrors."""
     df = df.copy()
     df.columns = [c.strip() for c in df.columns]
     return df
 
 
 def load_run_folders(root_dir: str):
-    """Return a sorted list of subfolders starting with 'run_' in root_dir."""
+    """Return sorted list of subfolders starting with 'run_' in root_dir."""
     if not os.path.isdir(root_dir):
         return []
     return sorted([d for d in os.listdir(root_dir) if d.startswith("run_")])
 
 
 def load_dataset(run_path: str):
-    """Load dataset.csv from run_path and normalize column names."""
+    """Load dataset.csv from run_path."""
     csv_path = os.path.join(run_path, "dataset.csv")
     if not os.path.exists(csv_path):
         return None, None
@@ -46,105 +44,76 @@ def load_dataset(run_path: str):
 
 
 def resolve_image_path(root_folder: str, raw_path: str) -> str:
-    """
-    Robust image path resolver.
-
-    Handles cases where:
-    - csv 'rgb_path' is absolute -> return normalized absolute
-    - csv 'rgb_path' is relative and already contains the run-folder root (avoid double-joining)
-    - csv 'rgb_path' is a plain relative path -> join with root_folder
-    - tries sensible fallbacks (cwd + relative)
-    """
+    """Normalize CSV image paths, safely resolving Windows/Linux inversions."""
     if raw_path is None:
         return ""
 
     p = str(raw_path).strip()
-
-    # Quick sanitize of slashes: use forward slashes for uniform checks
     p_forward = p.replace("\\", "/")
 
-    # If the csv contains an absolute path already
+    # If CSV path is absolute
     if os.path.isabs(p):
         return os.path.normpath(p)
 
-    # Base folder name for the selected root (e.g., 'runs_rgb_depth')
+    # Root dir base name
     root_base = os.path.basename(root_folder).replace("\\", "/")
 
-    # If the relative path already begins with the root_base (e.g., "runs_rgb_depth/...")
+    # If CSV path already includes root base (avoid double-joining)
     if p_forward.startswith(root_base + "/"):
-        # Join with parent directory of root_folder (one level up) to avoid duplication
         parent = os.path.dirname(root_folder)
         candidate = os.path.join(parent, *p_forward.split("/"))
         candidate = os.path.normpath(candidate)
         if os.path.exists(candidate):
             return candidate
-        # If not found, also try joining root_folder (in case of unexpected layout)
+
         alt = os.path.normpath(os.path.join(root_folder, *p_forward.split("/")))
         if os.path.exists(alt):
             return alt
-        # fallback to normalized candidate even if it doesn't exist
+
         return candidate
 
-    # Otherwise, typical case: join root_folder + relative path parts
+    # Typical: join with root folder
     candidate = os.path.normpath(os.path.join(root_folder, *p_forward.split("/")))
     if os.path.exists(candidate):
         return candidate
 
-    # Fallbacks: try cwd + relative
+    # Try cwd
     cwd_candidate = os.path.normpath(os.path.join(os.getcwd(), *p_forward.split("/")))
     if os.path.exists(cwd_candidate):
         return cwd_candidate
 
-    # Final fallback: return the most likely candidate (root_folder + relative) normalized
     return candidate
 
 
 def delete_frame_and_image(df: pd.DataFrame, csv_path: str, index_to_delete: int, root_folder: str):
-    """
-    Delete the CSV row at index_to_delete and the corresponding image file.
-    Returns updated dataframe.
-    """
-    # Defensive: ensure index is valid
+    """Delete image file and CSV row."""
     if index_to_delete < 0 or index_to_delete >= len(df):
         return df
 
     row = df.iloc[index_to_delete]
-    # Support column name variations by trying several common names
     possible_keys = ["rgb_path", "rgbpath", "image_path", "image"]
-    rgb_key = None
-    for k in possible_keys:
-        if k in df.columns:
-            rgb_key = k
-            break
+    rgb_key = next((k for k in possible_keys if k in df.columns), None)
+
     if rgb_key is None:
-        # fallback to exact column if present
-        if "rgb_path" in df.columns:
-            rgb_key = "rgb_path"
-        else:
-            # nothing we can do: remove row but can't delete file
-            df = df.drop(index_to_delete).reset_index(drop=True)
-            df.to_csv(csv_path, index=False)
-            return df
+        df = df.drop(index_to_delete).reset_index(drop=True)
+        df.to_csv(csv_path, index=False)
+        return df
 
-    raw_img_path = row[rgb_key]
-    img_full = resolve_image_path(root_folder, raw_img_path)
+    img_full = resolve_image_path(root_folder, row[rgb_key])
 
-    # Delete image file if it exists
     try:
         if img_full and os.path.exists(img_full):
             os.remove(img_full)
     except Exception as e:
-        # If deletion fails, continue to remove row and save CSV
         st.warning(f"Failed to delete image file {img_full}: {e}")
 
-    # Remove row from dataframe and save CSV
     df = df.drop(index_to_delete).reset_index(drop=True)
     df.to_csv(csv_path, index=False)
     return df
 
 
 def steering_visualization(steer_norm: float) -> str:
-    """Return a simple label for steering value."""
+    """Simple directional label."""
     try:
         s = float(steer_norm)
     except Exception:
@@ -157,22 +126,67 @@ def steering_visualization(steer_norm: float) -> str:
 
 
 # -------------------------
-# Streamlit UI
+# Bulk Removal: throttle_norm == 0
 # -------------------------
 
+def remove_zero_accel_frames(root_folder: str):
+    """Delete all frames with throttle_norm == 0 in ALL run_* folders."""
+    runs = load_run_folders(root_folder)
+    summary = []
+
+    for run in runs:
+        run_path = os.path.join(root_folder, run)
+        df, csv_path = load_dataset(run_path)
+        if df is None:
+            continue
+
+        if "throttle_norm" not in df.columns:
+            continue
+
+        before = len(df)
+        to_delete = df[df["throttle_norm"] == 0].index.tolist()
+
+        count_removed = 0
+
+        for idx in reversed(to_delete):
+            df = delete_frame_and_image(df, csv_path, idx, root_folder)
+            count_removed += 1
+
+        summary.append((run, before, before - count_removed, count_removed))
+
+    return summary
+
+
+# -------------------------
+# Streamlit UI
+# -------------------------
 st.title("📊 RC Car Dataset Viewer & Cleaner")
 
 root_folder = st.text_input("Root folder containing run_YYYYMMDD_HHMMSS folders (full path):")
 
+# -------------------------
+# Bulk Remove Zero Accel
+# -------------------------
+if root_folder and os.path.isdir(root_folder):
+    st.markdown("### 🧹 Bulk Cleanup Tool")
+    if st.button("🔥 Remove ALL frames with throttle_norm == 0 (across ALL runs)"):
+        summary = remove_zero_accel_frames(root_folder)
+
+        st.success("Bulk cleanup complete.")
+        for run, before, after, removed in summary:
+            st.write(f"**{run}** — {before} → {after} (removed {removed})")
+
+st.markdown("---")
+
 if root_folder:
     if not os.path.isdir(root_folder):
-        st.error("Provided root folder path does not exist or is not a directory.")
+        st.error("Provided root folder does not exist.")
         st.stop()
 
     run_folders = load_run_folders(root_folder)
 
     if not run_folders:
-        st.warning("No folders starting with 'run_' found inside the provided root folder.")
+        st.warning("No folders starting with 'run_' found.")
         st.stop()
 
     selected_run = st.selectbox("Select a run folder:", run_folders)
@@ -184,14 +198,12 @@ if root_folder:
             st.error(f"No dataset.csv found inside {run_path}")
             st.stop()
 
-        # Ensure column names are trimmed (again, defensive)
         df = normalize_df_columns(df)
 
-        # Session state index
         if "idx" not in st.session_state:
             st.session_state.idx = 0
 
-        # Top navigation
+        # Navigation arrows
         col_prev, col_center, col_next = st.columns([1, 1, 1])
 
         if col_prev.button("⬅️ Previous"):
@@ -200,7 +212,7 @@ if root_folder:
         if col_next.button("Next ➡️"):
             st.session_state.idx = min(len(df) - 1, st.session_state.idx + 1)
 
-        # Arrow key support (simple query-param trick)
+        # Arrow-key JS
         st.markdown(
             """
             <script>
@@ -220,44 +232,36 @@ if root_folder:
         params = st.experimental_get_query_params()
         if "prev" in params:
             st.session_state.idx = max(0, st.session_state.idx - 1)
-            # remove param by rerunning without it
             st.experimental_set_query_params()
         if "next" in params:
             st.session_state.idx = min(len(df) - 1, st.session_state.idx + 1)
             st.experimental_set_query_params()
 
-        # Clamp index
-        idx = min(max(0, st.session_state.idx), max(0, len(df) - 1))
+        idx = min(max(0, st.session_state.idx), len(df) - 1)
         st.session_state.idx = idx
 
-        # Get row safely
-        try:
-            row = df.iloc[idx]
-        except Exception:
-            st.error("Index out of range for the dataset.")
-            st.stop()
+        row = df.iloc[idx]
 
-        # Build and resolve image path
-        # Support several possible column names for image path
-        image_col_candidates = ["rgb_path", "rgbpath", "image_path", "image"]
-        image_col = next((c for c in image_col_candidates if c in df.columns), None)
+        # Determine image column
+        image_col = None
+        for c in ["rgb_path", "rgbpath", "image_path", "image"]:
+            if c in df.columns:
+                image_col = c
+                break
         if image_col is None:
-            # If none found, try to guess by looking for a column containing 'rgb' or 'img'
-            image_col = None
             for c in df.columns:
-                if "rgb" in c.lower() or "img" in c.lower() or "image" in c.lower():
+                if "rgb" in c.lower() or "img" in c.lower():
                     image_col = c
                     break
 
         raw_img_path = row[image_col] if image_col else ""
         img_full_path = resolve_image_path(root_folder, raw_img_path)
 
-        # Layout: image + info
-        img_col, info_col = st.columns([3, 2])
+        # Wider image
+        img_col, info_col = st.columns([4, 2])
 
         if not img_full_path or not os.path.exists(img_full_path):
             img_col.error(f"Image not found: {img_full_path}")
-            # still show text info below
         else:
             try:
                 img = Image.open(img_full_path)
@@ -265,26 +269,21 @@ if root_folder:
             except Exception as e:
                 img_col.error(f"Failed to open image {img_full_path}: {e}")
 
-        # Info panel
+        # Frame info
         info_col.subheader("Frame Information")
-        # Show timestamp if present
         if "timestamp" in df.columns:
             info_col.write(f"**Timestamp:** {row['timestamp']}")
-        # Depth front
         if "depth_front" in df.columns:
             info_col.write(f"**Depth (front):** {row['depth_front']}")
 
-        # Throttle and steering normalized values visualization
         throttle_norm = float(row["throttle_norm"]) if "throttle_norm" in df.columns else 0.0
         steer_norm = float(row["steer_norm"]) if "steer_norm" in df.columns else 0.0
 
         info_col.write("**Throttle (normalized):**")
-        # ensure progress between 0 and 1; if throttle_norm can be negative, clamp
         try:
-            t_val = min(max(float(throttle_norm), 0.0), 1.0)
-        except Exception:
-            t_val = 0.0
-        info_col.progress(t_val)
+            info_col.progress(min(max(float(throttle_norm), 0.0), 1.0))
+        except:
+            info_col.progress(0.0)
 
         steer_label = steering_visualization(steer_norm)
         if steer_label == "LEFT":
@@ -294,26 +293,21 @@ if root_folder:
         else:
             info_col.write("**Steering:** ⏺ CENTER")
 
-        # Delete controls
+        # Delete button
         st.markdown("---")
-        st.write("Use the button below to permanently delete this frame (image file + CSV row).")
-        if st.button("🗑️ Delete this frame permanently"):
-            # perform deletion (image + csv row)
+        st.write("Delete this frame permanently.")
+        if st.button("🗑️ Delete this frame"):
             df = delete_frame_and_image(df, csv_path, idx, root_folder)
-            st.success(f"Deleted frame {idx}. CSV saved: {csv_path}")
-            # adjust index to stay within bounds
+            st.success(f"Deleted frame {idx}.")
             new_len = len(df)
             if new_len == 0:
                 st.session_state.idx = 0
             else:
                 st.session_state.idx = min(idx, new_len - 1)
-            # rerun to show updated frame
             st.experimental_rerun()
 
-        # Optional: show a small summary for the run
         st.markdown("---")
-        st.write(f"**Run:** {selected_run}  —  **Frames:** {len(df)}")
-        # Show a small tail of the dataframe columns that might be useful
-        with st.expander("Preview dataframe columns and current row"):
-            st.write(df.iloc[max(0, idx - 2): idx + 3])
+        st.write(f"**Run:** {selected_run} — **Frames:** {len(df)}")
 
+        with st.expander("Preview dataframe rows:"):
+            st.write(df.iloc[max(0, idx - 2): idx + 3])
