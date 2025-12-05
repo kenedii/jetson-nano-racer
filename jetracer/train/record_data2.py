@@ -19,6 +19,7 @@ import pygame
 from smbus2 import SMBus
 import cv2
 import realsense_full  # RealSense pipeline (your module)
+import numpy as np
 
 # ================= ASYNC SAVER =================
 class AsyncSaver:
@@ -219,9 +220,18 @@ def get_rgb_and_front_depth():
     if rgb is None or depth is None:
         return None, None
     
-    # We only need center depth for the CSV, so we calculate it here
+    # Calculate center depth (average of a small 5x5 window for stability)
     h, w = depth.shape
-    center_depth = float(depth[h//2, w//2])
+    cy, cx = h // 2, w // 2
+    # Take a small crop and average it to avoid single-pixel noise (0 values)
+    center_crop = depth[cy-2:cy+3, cx-2:cx+3]
+    # Filter out 0s (invalid depth)
+    valid_pixels = center_crop[center_crop > 0]
+    
+    if len(valid_pixels) > 0:
+        center_depth = float(np.mean(valid_pixels))
+    else:
+        center_depth = 0.0
     
     # Return FULL RGB image so we can resize it in the background thread
     return rgb, center_depth
@@ -383,8 +393,11 @@ try:
                     
                     frame_idx += 1
                     last_save_time = now
-                    print(f"\rFrame {frame_idx:05d} | S {pwm_to_norm(steer_us):+0.3f} | "
-                          f"T {pwm_to_norm(throttle_us):+0.3f} | Depth {depth_front:.2f}", end="")
+                    
+                    # Print status less frequently to avoid terminal blocking
+                    if frame_idx % 10 == 0:
+                        print(f"\rFrame {frame_idx:05d} | S {pwm_to_norm(steer_us):+0.3f} | "
+                              f"T {pwm_to_norm(throttle_us):+0.3f} | Depth {depth_front:.2f}", end="")
 
         time.sleep(0.001) # Reduced sleep to 1ms for higher polling rate
 
