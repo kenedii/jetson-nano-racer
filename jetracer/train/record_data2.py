@@ -201,6 +201,11 @@ def get_rgb_and_front_depth():
 
 def save_buffer_to_disk():
     global ram_buffer
+    # Stop recording first to prevent new appends
+    global recording
+    recording = False
+    time.sleep(0.5) # Wait for thread to stop
+    
     if not ram_buffer:
         return
     
@@ -232,22 +237,24 @@ def save_buffer_to_disk():
 
 def delete_last_n(n):
     global frame_idx, ram_buffer
-    if not ram_buffer:
-        print("\nBuffer empty, nothing to delete")
-        return
-        
-    n = min(n, len(ram_buffer))
-    # Remove from RAM buffer
-    del ram_buffer[-n:]
-    frame_idx -= n
-    print(f"\nDeleted last {n} frames from RAM -> now at {frame_idx}")
+    with recording_lock:
+        if not ram_buffer:
+            print("\nBuffer empty, nothing to delete")
+            return
+            
+        n = min(n, len(ram_buffer))
+        # Remove from RAM buffer
+        del ram_buffer[-n:]
+        frame_idx -= n
+        print(f"\nDeleted last {n} frames from RAM -> now at {frame_idx}")
 
 def delete_current_session():
     global frame_idx, ram_buffer, RUN_DIR, csv_path
     confirm = input(f"\nDelete current session '{RUN_DIR}'? [y/N]: ").strip().lower()
     if confirm == 'y':
-        ram_buffer.clear()
-        frame_idx = 0
+        with recording_lock:
+            ram_buffer.clear()
+            frame_idx = 0
         print(f"Session cleared from RAM!")
         # No need to delete files since we haven't written them yet
         try:
@@ -266,6 +273,66 @@ def delete_current_session():
         print(f"New session started: {RUN_DIR}")
         writer.writerow(["timestamp","steer_us","throttle_us","steer_norm","throttle_norm","depth_front","rgb_path"])
         frame_idx = 0
+
+# ================= SHARED STATE =================
+current_steer_us = STEERING_CENTER
+current_throttle_us = THROTTLE_CENTER
+recording = False
+recording_lock = threading.Lock()
+
+# ================= RECORDING THREAD =================
+def recording_worker():
+    global frame_idx, ram_buffer, recording, current_steer_us, current_throttle_us
+    last_save_time = 0
+    last_steer_rec = STEERING_CENTER
+    last_throttle_rec = THROTTLE_CENTER
+    MIN_CHANGE_US = 15
+
+    print("Recording thread started...")
+    
+    while True:
+        if recording:
+            now = time.time()
+            if now - last_save_time >= 1.0 / cfg.TARGET_FPS:
+                # Check if inputs changed enough to warrant a frame (optional, but keeps dataset clean)
+                # Access shared variables safely (integers are atomic, but good practice)
+                s_us = current_steer_us
+                t_us = current_throttle_us
+                
+                if abs(s_us - last_steer_rec) >= MIN_CHANGE_US or abs(t_us - last_throttle_rec) >= MIN_CHANGE_US:
+                    # Fetch frame - this is the slow part that was blocking the main loop
+                    rgb, depth_front = get_rgb_and_front_depth()
+                    
+                    if rgb is not None:
+                        last_steer_rec = s_us
+                        last_throttle_rec = t_us
+                        
+                        rgb_path = os.path.join(RUN_DIR, f"rgb_{frame_idx:05d}.png")
+                        
+                        # Prepare data
+                        row_data = [time.time(), s_us, t_us,
+                                    pwm_to_norm(s_us), pwm_to_norm(t_us),
+                                    depth_front, rgb_path]
+                        
+                        # Store in RAM
+                        with recording_lock:
+                            ram_buffer.append((rgb, row_data))
+                            frame_idx += 1
+                        
+                        last_save_time = now
+                        
+                        if frame_idx % 10 == 0:
+                            print(f"\rRAM Buffer: {len(ram_buffer)} | S {pwm_to_norm(s_us):+0.3f} | "
+                                  f"T {pwm_to_norm(t_us):+0.3f} | Depth {depth_front:.2f}", end="")
+            
+            # Small sleep to prevent CPU hogging in this thread
+            time.sleep(0.005)
+        else:
+            # Sleep longer when not recording
+            time.sleep(0.1)
+
+# Start the recording thread
+threading.Thread(target=recording_worker, daemon=True).start()
 
 # ================= INPUT THREAD =================
 recording = False
@@ -302,14 +369,16 @@ def apply_deadzone(value, threshold=cfg.AXIS_DEADZONE):
 # ================= MAIN LOOP =================
 last_steer_sent = -1
 last_throttle_sent = -1
-last_steer_rec = STEERING_CENTER
-last_throttle_rec = THROTTLE_CENTER
-MIN_CHANGE_US = 15
+
+# Start camera pipeline immediately to avoid startup lag when recording begins
+try:
+    realsense_full.start_pipeline()
+except Exception as e:
+    print(f"Warning: Camera failed to start: {e}")
 
 try:
     # Ensure neutral at start
     neutralize()
-    last_save_time = 0
     while True:
         pygame.event.pump()
 
@@ -354,34 +423,15 @@ try:
                 pca.set_us(cfg.THROTTLE_CHANNEL, throttle_us)
                 last_steer_sent = steer_us
                 last_throttle_sent = throttle_us
+                
+                # Update shared state for the recording thread
+                current_steer_us = steer_us
+                current_throttle_us = throttle_us
+                
             except Exception as e:
                 print(f"[PCA ERROR] {e}")
 
-        # Recording & saving at TARGET_FPS
-        now = time.time()
-        if recording and now - last_save_time >= 1.0 / cfg.TARGET_FPS:
-            if abs(steer_us - last_steer_rec) >= MIN_CHANGE_US or abs(throttle_us - last_throttle_rec) >= MIN_CHANGE_US:
-                last_steer_rec, last_throttle_rec = steer_us, throttle_us
-                rgb, depth_front = get_rgb_and_front_depth()
-                if rgb is not None:
-                    rgb_path = os.path.join(RUN_DIR, f"rgb_{frame_idx:05d}.png")
-                    
-                    # Prepare data for RAM buffer
-                    row_data = [time.time(), steer_us, throttle_us,
-                                pwm_to_norm(steer_us), pwm_to_norm(throttle_us),
-                                depth_front, rgb_path]
-                    
-                    # Store in RAM (Full RGB + Metadata)
-                    ram_buffer.append((rgb, row_data))
-                    
-                    frame_idx += 1
-                    last_save_time = now
-                    
-                    # Print status less frequently to avoid terminal blocking
-                    if frame_idx % 10 == 0:
-                        print(f"\rRAM Buffer: {len(ram_buffer)} | S {pwm_to_norm(steer_us):+0.3f} | "
-                              f"T {pwm_to_norm(throttle_us):+0.3f} | Depth {depth_front:.2f}", end="")
-
+        # Main loop only handles control now. Recording is in background thread.
         time.sleep(0.001) # Reduced sleep to 1ms for higher polling rate
 
 except KeyboardInterrupt:
