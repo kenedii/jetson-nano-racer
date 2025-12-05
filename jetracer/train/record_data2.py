@@ -298,6 +298,7 @@ def network_listener():
     sock.settimeout(0.2)  # avoid blocking forever on flaky links
     print(f"[NET] Listening for controller on udp://{NET_HOST}:{NET_PORT}")
 
+    recv_count = 0
     while True:
         try:
             data, _ = sock.recvfrom(256)
@@ -305,12 +306,16 @@ def network_listener():
             s = float(msg.get("s", 0.0))
             t = float(msg.get("t", 0.0))
             ts = float(msg.get("ts", time.time()))
+            arrival_ts = time.time()
             # Clamp incoming values
             s = max(min(s, 1.0), -1.0)
             t = max(min(t, 1.0), -1.0)
             net_steer_norm = s
             net_throttle_norm = t
-            net_last_ts = ts
+            # Use Jetson time for timeout logic to avoid clock skew with sender
+            net_last_ts = arrival_ts
+            recv_count += 1
+            print(f"[NET RX] #{recv_count} s={s:+.2f} t={t:+.2f} ts={ts:.2f} arrival={arrival_ts:.2f}")
         except socket.timeout:
             continue
         except Exception as e:
@@ -408,6 +413,7 @@ def apply_deadzone(value, threshold=cfg.AXIS_DEADZONE):
 # ================= MAIN LOOP =================
 last_steer_sent = -1
 last_throttle_sent = -1
+last_pca_send_ts = 0.0
 
 # Start camera pipeline immediately to avoid startup lag when recording begins
 if CAMERA_ENABLED:
@@ -461,13 +467,21 @@ try:
                 steer_us = int(STEERING_CENTER + s * (STEERING_MAX - STEERING_CENTER))
                 throttle_us = int(THROTTLE_CENTER + t * (THROTTLE_MAX - THROTTLE_CENTER))
 
-        # Send to PCA ONLY if changed (reduces I2C bus congestion)
+        # Send to PCA if changed OR at keepalive interval to mirror old constant updates
+        send_now = False
+        now_ts = time.time()
         if steer_us != last_steer_sent or throttle_us != last_throttle_sent:
+            send_now = True
+        elif now_ts - last_pca_send_ts >= 0.05:  # 20 Hz keepalive pulses
+            send_now = True
+
+        if send_now:
             try:
                 pca.set_us(cfg.STEERING_CHANNEL, steer_us)
                 pca.set_us(cfg.THROTTLE_CHANNEL, throttle_us)
                 last_steer_sent = steer_us
                 last_throttle_sent = throttle_us
+                last_pca_send_ts = now_ts
                 
                 # Update shared state for the recording thread
                 current_steer_us = steer_us

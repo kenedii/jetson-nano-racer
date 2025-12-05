@@ -45,6 +45,7 @@ def main():
     interval = 1.0 / SEND_HZ
     next_send = time.time()
 
+    counter = 0
     try:
         while True:
             pygame.event.pump()
@@ -73,6 +74,8 @@ def main():
                 pkt = {"s": steer, "t": throttle, "ts": now}
                 try:
                     sock.sendto(json.dumps(pkt).encode("utf-8"), (JETSON_HOST, JETSON_PORT))
+                    counter += 1
+                    print(f"[NET TX] #{counter} -> {JETSON_HOST}:{JETSON_PORT} s={steer:+.2f} t={throttle:+.2f} ts={now:.2f}")
                 except Exception as e:
                     print(f"send error: {e}")
                 next_send = now + interval
