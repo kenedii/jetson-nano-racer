@@ -50,9 +50,10 @@ def start_pipeline():
         config = rs.config()
 
         # Enable the three streams we need
-        config.enable_stream(rs.stream.color, 640, 480, rs.format.rgb8, 30)
-        config.enable_stream(rs.stream.infrared, 1, 640, 480, rs.format.y8, 30)
-        config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
+        # Reduced to 15 FPS to lower CPU load on Jetson Nano
+        config.enable_stream(rs.stream.color, 640, 480, rs.format.rgb8, 15)
+        config.enable_stream(rs.stream.infrared, 1, 640, 480, rs.format.y8, 15)
+        config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 15)
 
         pipeline.start(config)
 
@@ -78,6 +79,13 @@ def stop_pipeline():
         align = None
     print("[RealSense] Pipeline stopped.")
 
+def get_aligned_frames():
+    """Returns (rgb, depth) tuple efficiently with single lock acquisition"""
+    start_pipeline()
+    with frame_lock:
+        if latest_frames["rgb"] is None or latest_frames["depth"] is None:
+            return None, None
+        return latest_frames["rgb"].copy(), latest_frames["depth"].copy()
 
 # --------------------- RGB ---------------------
 def get_rgb_image():

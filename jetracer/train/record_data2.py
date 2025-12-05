@@ -200,9 +200,11 @@ writer.writerow(["timestamp","steer_us","throttle_us","steer_norm","throttle_nor
 frame_idx = 0
 
 # ================= HELPERS =================
-def save_task(rgb, rgb_path, row_data, writer_obj, csv_file_obj):
+def save_task(rgb_full, rgb_path, row_data, writer_obj, csv_file_obj, target_size):
     try:
-        cv2.imwrite(rgb_path, rgb)
+        # Resize in the background thread to save main thread CPU
+        rgb_small = cv2.resize(rgb_full, target_size)
+        cv2.imwrite(rgb_path, rgb_small)
         writer_obj.writerow(row_data)
         csv_file_obj.flush()
     except Exception as e:
@@ -212,14 +214,17 @@ def pwm_to_norm(us):
     return (us - 1500) / 500.0
 
 def get_rgb_and_front_depth():
-    rgb = realsense_full.get_rgb_image()
-    depth = realsense_full.get_depth_image()
+    # Use optimized single-lock fetch
+    rgb, depth = realsense_full.get_aligned_frames()
     if rgb is None or depth is None:
         return None, None
-    rgb_small = cv2.resize(rgb, (cfg.IMG_WIDTH, cfg.IMG_HEIGHT))
+    
+    # We only need center depth for the CSV, so we calculate it here
     h, w = depth.shape
     center_depth = float(depth[h//2, w//2])
-    return rgb_small, center_depth
+    
+    # Return FULL RGB image so we can resize it in the background thread
+    return rgb, center_depth
 
 def delete_last_n(n):
     global frame_idx, csv_file, writer
@@ -373,8 +378,8 @@ try:
                                 pwm_to_norm(steer_us), pwm_to_norm(throttle_us),
                                 depth_front, rgb_path]
                     
-                    # Offload to thread
-                    saver.save(save_task, rgb, rgb_path, row_data, writer, csv_file)
+                    # Offload to thread (pass full RGB and target size)
+                    saver.save(save_task, rgb, rgb_path, row_data, writer, csv_file, (cfg.IMG_WIDTH, cfg.IMG_HEIGHT))
                     
                     frame_idx += 1
                     last_save_time = now
