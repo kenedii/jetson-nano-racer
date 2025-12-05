@@ -63,9 +63,9 @@ def main():
                 if lt < AXIS_DEADZONE:
                     lt = 0.0
                 throttle = rt - lt  # -1..1
-                if DEBUG_TRIGGERS and time.time() >= next_debug:
-                    print(f"[TRIG] rt_raw={js.get_axis(RIGHT_TRIGGER_AXIS):+.3f} lt_raw={js.get_axis(LEFT_TRIGGER_AXIS):+.3f} rt={rt:+.2f} lt={lt:+.2f} throttle={throttle:+.2f}")
-                    next_debug = time.time() + 0.5
+                # if DEBUG_TRIGGERS and time.time() >= next_debug:
+                #     print(f"[TRIG] rt_raw={js.get_axis(RIGHT_TRIGGER_AXIS):+.3f} lt_raw={js.get_axis(LEFT_TRIGGER_AXIS):+.3f} rt={rt:+.2f} lt={lt:+.2f} throttle={throttle:+.2f}")
+                #     next_debug = time.time() + 0.5
             else:
                 raw_thr = -js.get_axis(THROTTLE_AXIS)
                 throttle = apply_deadzone(raw_thr)
