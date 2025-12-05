@@ -7,39 +7,34 @@ import time
 # Global objects - created once
 pipeline = None
 align = None
-latest_frames = {"rgb": None, "depth": None, "ir": None}
+# Store only RGB frame and the center depth value (float) to minimize bandwidth/CPU
+latest_frames = {"rgb": None, "depth_center": 0.0}
 import threading
 frame_lock = threading.Lock()
 stop_event = threading.Event()
 
 def camera_worker():
+    """Background fetcher: copies RGB, reads center depth only (float)."""
     global latest_frames
     while not stop_event.is_set():
         try:
             frames = pipeline.wait_for_frames(timeout_ms=2000)
             aligned = align.process(frames)
             
-            # Get frames
             color_frame = aligned.get_color_frame()
             depth_frame = aligned.get_depth_frame()
 
             if color_frame and depth_frame:
-                # Convert to numpy arrays AND COPY immediately
-                # This ensures the data is safe and moves the copy cost to this background thread
                 rgb = np.asanyarray(color_frame.get_data()).copy()
-                
-                # OPTIMIZATION: Only grab the center pixel depth here to save massive bandwidth
-                # Instead of copying the entire 640x480 depth map (600KB), we just get the center value
-                # However, to keep the interface consistent, we'll still store the full frame if needed,
-                # but we can optimize this further if you ONLY ever need the float.
-                # For now, let's keep the full depth copy but remove IR completely.
-                depth = np.asanyarray(depth_frame.get_data()).copy()
-                
-                # Update global state safely
+
+                # Read only center depth to avoid copying the whole depth map (~600KB/frame)
+                w = depth_frame.get_width()
+                h = depth_frame.get_height()
+                depth_center = float(depth_frame.get_distance(w // 2, h // 2))
+
                 with frame_lock:
                     latest_frames["rgb"] = rgb
-                    latest_frames["depth"] = depth
-                    latest_frames["ir"] = None # IR disabled
+                    latest_frames["depth_center"] = depth_center
         except Exception as e:
             print(f"[RealSense Thread Error] {e}")
 
@@ -50,9 +45,9 @@ def start_pipeline():
         config = rs.config()
 
         # Enable ONLY RGB and Depth streams (Disable IR to save USB bandwidth/CPU)
-        # Reduced to 15 FPS to lower CPU load on Jetson Nano
-        config.enable_stream(rs.stream.color, 640, 480, rs.format.rgb8, 15)
-        config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 15)
+        # Reduced resolution + 15 FPS to lower CPU load on Jetson Nano
+        config.enable_stream(rs.stream.color, 424, 240, rs.format.rgb8, 15)
+        config.enable_stream(rs.stream.depth, 424, 240, rs.format.z16, 15)
         # config.enable_stream(rs.stream.infrared, 1, 640, 480, rs.format.y8, 15) # DISABLED
 
         pipeline.start(config)
@@ -80,13 +75,12 @@ def stop_pipeline():
     print("[RealSense] Pipeline stopped.")
 
 def get_aligned_frames():
-    """Returns (rgb, depth) tuple efficiently with single lock acquisition"""
+    """Returns (rgb, depth_center_float) with single lock acquisition"""
     start_pipeline()
     with frame_lock:
-        if latest_frames["rgb"] is None or latest_frames["depth"] is None:
+        if latest_frames["rgb"] is None:
             return None, None
-        # Return REFERENCES, not copies. The background thread already copied them.
-        return latest_frames["rgb"], latest_frames["depth"]
+        return latest_frames["rgb"], latest_frames["depth_center"]
 
 # --------------------- RGB ---------------------
 def get_rgb_image():
@@ -127,45 +121,27 @@ def save_ir_image(filename):
 
 # --------------------- DEPTH ---------------------
 def get_depth_image():
-    start_pipeline()
-    with frame_lock:
-        if latest_frames["depth"] is None:
-            return None
-        return latest_frames["depth"].copy()
+    # Depth map is no longer stored to reduce CPU. Return None to indicate unavailable.
+    return None
 
 
 def save_depth_image(filename, colored=True):
     depth = get_depth_image()
     if depth is None:
+        print("[Depth] Full depth map not stored (optimized mode).")
         return False
-
-    # Save raw 16-bit depth (perfect for later use)
-    raw_name = filename.replace(".png", "_raw.png")
-    cv2.imwrite(raw_name, depth)
-    print("[SAVED] Raw depth -> " + raw_name)
-
-    if colored:
-        # Scale depth for visualization (e.g., scale 5 meters (5000mm) to 255)
-        vis = cv2.applyColorMap(cv2.convertScaleAbs(depth, alpha=255/5000), cv2.COLORMAP_JET)
-        color_name = filename.replace(".png", "_color.jpg")
-        cv2.imwrite(color_name, vis)
-        print("[SAVED] Depth color -> " + color_name)
-
-    return True
+    # If enabled in the future, the code below can run.
+    return False
 
 
 # --------------------- Distance helper ---------------------
 def get_center_distance():
-    depth = get_depth_image()
-    if depth is None:
+    _, depth_center = get_aligned_frames()
+    if depth_center is None:
         return 0
-    h, w = depth.shape
-    dist_mm = depth[h//2, w//2]
-    
-    # Depth value of 0 means no valid depth detected (e.g., outside range or reflective)
-    if dist_mm == 0:
+    if depth_center == 0:
         return 0
-    return dist_mm / 1000.0  # return meters
+    return depth_center
 
 
 # --------------------- Quick test ---------------------

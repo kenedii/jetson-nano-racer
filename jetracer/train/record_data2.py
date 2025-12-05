@@ -178,26 +178,12 @@ def pwm_to_norm(us):
     return (us - 1500) / 500.0
 
 def get_rgb_and_front_depth():
-    # Use optimized single-lock fetch
-    rgb, depth = realsense_full.get_aligned_frames()
-    if rgb is None or depth is None:
+    # Use optimized fetch: RGB frame + center depth float (already aligned)
+    rgb, center_depth = realsense_full.get_aligned_frames()
+    if rgb is None:
         return None, None
-    
-    # Calculate center depth (average of a small 5x5 window for stability)
-    h, w = depth.shape
-    cy, cx = h // 2, w // 2
-    # Take a small crop and average it to avoid single-pixel noise (0 values)
-    center_crop = depth[cy-2:cy+3, cx-2:cx+3]
-    # Filter out 0s (invalid depth)
-    valid_pixels = center_crop[center_crop > 0]
-    
-    if len(valid_pixels) > 0:
-        center_depth = float(np.mean(valid_pixels))
-    else:
-        center_depth = 0.0
-    
-    # Return FULL RGB image so we can resize it in the background thread
-    return rgb, center_depth
+    # center_depth is already a float (meters). No extra processing.
+    return rgb, float(center_depth)
 
 def save_buffer_to_disk():
     global ram_buffer
