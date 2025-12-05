@@ -15,11 +15,21 @@ import threading
 import atexit
 import queue
 from datetime import datetime
+import socket
+import json
 import pygame
 from smbus2 import SMBus
 import cv2
 import realsense_full  # RealSense pipeline (your module)
 import numpy as np
+
+# ================= INPUT MODE =================
+# Switch between local Xbox (direct USB/pygame) vs. network controller (from laptop)
+USE_NETWORK_CONTROLLER = True
+NET_HOST = "0.0.0.0"
+NET_PORT = 5007
+# Hotspot-friendly timeout: allow brief jitter before neutralizing
+NET_TIMEOUT_S = 1.0
 
 # ================= DEBUG/DIAG FLAGS =================
 # Set to False to bypass camera during recording (for lag diagnostics)
@@ -109,14 +119,15 @@ def neutralize():
 neutralize()
 atexit.register(neutralize)
 
-# ================= PYGAME =================
-pygame.init()
-pygame.joystick.init()
-if pygame.joystick.get_count() == 0:
-    raise Exception("No joystick detected! Connect Xbox controller.")
-joystick = pygame.joystick.Joystick(0)
-joystick.init()
-print(f"Joystick detected: {joystick.get_name()}")
+# ================= PYGAME (conditional) =================
+if not USE_NETWORK_CONTROLLER:
+    pygame.init()
+    pygame.joystick.init()
+    if pygame.joystick.get_count() == 0:
+        raise Exception("No joystick detected! Connect Xbox controller.")
+    joystick = pygame.joystick.Joystick(0)
+    joystick.init()
+    print(f"Joystick detected: {joystick.get_name()}")
 
 # ================= CONTROL MODE SELECTION =================
 print("\nChoose control mode:")
@@ -273,6 +284,41 @@ current_throttle_us = THROTTLE_CENTER
 recording = False
 recording_lock = threading.Lock()
 
+# Network controller state
+net_last_ts = 0.0
+net_steer_norm = 0.0
+net_throttle_norm = 0.0
+
+# ================= NETWORK LISTENER =================
+def network_listener():
+    global net_last_ts, net_steer_norm, net_throttle_norm
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((NET_HOST, NET_PORT))
+    sock.settimeout(0.2)  # avoid blocking forever on flaky links
+    print(f"[NET] Listening for controller on udp://{NET_HOST}:{NET_PORT}")
+
+    while True:
+        try:
+            data, _ = sock.recvfrom(256)
+            msg = json.loads(data.decode('utf-8'))
+            s = float(msg.get("s", 0.0))
+            t = float(msg.get("t", 0.0))
+            ts = float(msg.get("ts", time.time()))
+            # Clamp incoming values
+            s = max(min(s, 1.0), -1.0)
+            t = max(min(t, 1.0), -1.0)
+            net_steer_norm = s
+            net_throttle_norm = t
+            net_last_ts = ts
+        except socket.timeout:
+            continue
+        except Exception as e:
+            print(f"[NET] recv error: {e}")
+
+if USE_NETWORK_CONTROLLER:
+    threading.Thread(target=network_listener, daemon=True).start()
+
 # ================= RECORDING THREAD =================
 def recording_worker():
     global frame_idx, ram_buffer, recording, current_steer_us, current_throttle_us
@@ -374,41 +420,46 @@ try:
     # Ensure neutral at start
     neutralize()
     while True:
-        pygame.event.pump()
+        if not USE_NETWORK_CONTROLLER:
+            pygame.event.pump()
 
-        # STEERING (left stick X) - invert to match mapping
-        raw_steer = -joystick.get_axis(cfg.STEERING_AXIS)
-        raw_steer = apply_deadzone(raw_steer)
-        
-        # Apply Gamma Curve for fine control
-        # steer = sign(raw) * (|raw| ^ gamma)
-        sign = 1 if raw_steer >= 0 else -1
-        steer_curved = sign * (abs(raw_steer) ** cfg.STEERING_GAMMA)
-        
-        steer = max(min(steer_curved, cfg.STEERING_MAX_SCALE), -cfg.STEERING_MAX_SCALE)
+            # STEERING (left stick X) - invert to match mapping
+            raw_steer = -joystick.get_axis(cfg.STEERING_AXIS)
+            raw_steer = apply_deadzone(raw_steer)
+            
+            # Apply Gamma Curve for fine control
+            sign = 1 if raw_steer >= 0 else -1
+            steer_curved = sign * (abs(raw_steer) ** cfg.STEERING_GAMMA)
+            steer = max(min(steer_curved, cfg.STEERING_MAX_SCALE), -cfg.STEERING_MAX_SCALE)
 
-        # THROTTLE selection by mode
-        if mode == 3:
-            # Correct trigger math using explicit RT & LT axes
-            rt = (joystick.get_axis(cfg.RIGHT_TRIGGER_AXIS) + 1.0) / 2.0  # 0 -> 1
-            lt = (joystick.get_axis(cfg.LEFT_TRIGGER_AXIS)  + 1.0) / 2.0  # 0 -> 1
-            # apply trigger deadzone
-            if rt < cfg.AXIS_DEADZONE:
-                rt = 0.0
-            if lt < cfg.AXIS_DEADZONE:
-                lt = 0.0
-            throttle_axis = rt - lt  # -1 -> +1
+            # THROTTLE selection by mode
+            if mode == 3:
+                rt = (joystick.get_axis(cfg.RIGHT_TRIGGER_AXIS) + 1.0) / 2.0
+                lt = (joystick.get_axis(cfg.LEFT_TRIGGER_AXIS)  + 1.0) / 2.0
+                if rt < cfg.AXIS_DEADZONE:
+                    rt = 0.0
+                if lt < cfg.AXIS_DEADZONE:
+                    lt = 0.0
+                throttle_axis = rt - lt  # -1 -> +1
+            else:
+                raw_thr = -joystick.get_axis(cfg.THROTTLE_AXIS)
+                raw_thr = apply_deadzone(raw_thr)
+                throttle_axis = raw_thr
+
+            throttle_axis = max(min(throttle_axis, cfg.THROTTLE_MAX_SCALE), -cfg.THROTTLE_MAX_SCALE)
+            steer_us = int(STEERING_CENTER + steer * (STEERING_MAX - STEERING_CENTER))
+            throttle_us = int(THROTTLE_CENTER + throttle_axis * (THROTTLE_MAX - THROTTLE_CENTER))
         else:
-            raw_thr = -joystick.get_axis(cfg.THROTTLE_AXIS)
-            raw_thr = apply_deadzone(raw_thr)
-            throttle_axis = raw_thr
-
-        # Clamp throttle to safety scale
-        throttle_axis = max(min(throttle_axis, cfg.THROTTLE_MAX_SCALE), -cfg.THROTTLE_MAX_SCALE)
-
-        # Convert to PWM µs
-        steer_us = int(STEERING_CENTER + steer * (STEERING_MAX - STEERING_CENTER))
-        throttle_us = int(THROTTLE_CENTER + throttle_axis * (THROTTLE_MAX - THROTTLE_CENTER))
+            # Use network-provided normalized values
+            now = time.time()
+            if now - net_last_ts > NET_TIMEOUT_S:
+                steer_us = STEERING_CENTER
+                throttle_us = THROTTLE_CENTER
+            else:
+                s = max(min(net_steer_norm, cfg.STEERING_MAX_SCALE), -cfg.STEERING_MAX_SCALE)
+                t = max(min(net_throttle_norm, cfg.THROTTLE_MAX_SCALE), -cfg.THROTTLE_MAX_SCALE)
+                steer_us = int(STEERING_CENTER + s * (STEERING_MAX - STEERING_CENTER))
+                throttle_us = int(THROTTLE_CENTER + t * (THROTTLE_MAX - THROTTLE_CENTER))
 
         # Send to PCA ONLY if changed (reduces I2C bus congestion)
         if steer_us != last_steer_sent or throttle_us != last_throttle_sent:
@@ -434,7 +485,8 @@ except KeyboardInterrupt:
 finally:
     save_buffer_to_disk()
     neutralize()
-    pygame.quit()
+    if not USE_NETWORK_CONTROLLER:
+        pygame.quit()
     if CAMERA_ENABLED:
         try:
             realsense_full.stop_pipeline()
