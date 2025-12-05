@@ -21,40 +21,9 @@ import cv2
 import realsense_full  # RealSense pipeline (your module)
 import numpy as np
 
-# ================= ASYNC SAVER =================
-class AsyncSaver:
-    def __init__(self):
-        self.queue = queue.Queue()
-        self.running = True
-        self.thread = threading.Thread(target=self._worker, daemon=True)
-        self.thread.start()
-
-    def _worker(self):
-        while self.running:
-            try:
-                item = self.queue.get(timeout=0.1)
-                if item is None:
-                    continue
-                
-                # Unpack
-                func, args = item
-                try:
-                    func(*args)
-                except Exception as e:
-                    print(f"[Saver Error] {e}")
-                
-                self.queue.task_done()
-            except queue.Empty:
-                continue
-
-    def save(self, func, *args):
-        self.queue.put((func, args))
-
-    def stop(self):
-        self.running = False
-        self.thread.join()
-
-saver = AsyncSaver()
+# ================= RAM BUFFER =================
+# Stores tuples of (rgb_image, row_data)
+ram_buffer = []
 
 # ================= CONFIG =================
 class Config:
@@ -195,22 +164,16 @@ def create_new_session():
 
 RUN_DIR = create_new_session()
 csv_path = os.path.join(RUN_DIR, "dataset.csv")
-csv_file = open(csv_path, "w", newline="")
-writer = csv.writer(csv_file)
-writer.writerow(["timestamp","steer_us","throttle_us","steer_norm","throttle_norm","depth_front","rgb_path"])
+
+# Initialize CSV with header
+with open(csv_path, "w", newline="") as f:
+    writer = csv.writer(f)
+    writer.writerow(["timestamp","steer_us","throttle_us","steer_norm","throttle_norm","depth_front","rgb_path"])
+
 frame_idx = 0
+ram_buffer = []
 
 # ================= HELPERS =================
-def save_task(rgb_full, rgb_path, row_data, writer_obj, csv_file_obj, target_size):
-    try:
-        # Resize in the background thread to save main thread CPU
-        rgb_small = cv2.resize(rgb_full, target_size)
-        cv2.imwrite(rgb_path, rgb_small)
-        writer_obj.writerow(row_data)
-        csv_file_obj.flush()
-    except Exception as e:
-        print(f"Save error: {e}")
-
 def pwm_to_norm(us):
     return (us - 1500) / 500.0
 
@@ -236,42 +199,57 @@ def get_rgb_and_front_depth():
     # Return FULL RGB image so we can resize it in the background thread
     return rgb, center_depth
 
-def delete_last_n(n):
-    global frame_idx, csv_file, writer
-    if frame_idx == 0:
-        print("\nNothing to delete")
+def save_buffer_to_disk():
+    global ram_buffer
+    if not ram_buffer:
         return
-    n = min(n, frame_idx)
-    # read existing rows and keep header + remaining rows (without last n)
-    with open(csv_path, 'r', newline='') as f:
-        rows = list(csv.reader(f))
-    header = rows[:1]
-    data = rows[1:]
-    remaining = data[:-n] if n < len(data) else []
-    with open(csv_path, 'w', newline='') as f:
-        w = csv.writer(f)
-        w.writerows(header + remaining)
-    # delete images
-    for i in range(frame_idx-n, frame_idx):
-        rgb_file = os.path.join(RUN_DIR, f"rgb_{i:05d}.png")
-        if os.path.exists(rgb_file):
-            os.remove(rgb_file)
+    
+    print(f"\nSaving {len(ram_buffer)} frames to disk... DO NOT POWER OFF")
+    
+    # Use a local writer to ensure file is open
+    with open(csv_path, "a", newline="") as f:
+        local_writer = csv.writer(f)
+        
+        for i, (rgb_full, row_data) in enumerate(ram_buffer):
+            try:
+                # Resize
+                rgb_small = cv2.resize(rgb_full, (cfg.IMG_WIDTH, cfg.IMG_HEIGHT))
+                
+                # Save Image (row_data[-1] is the path)
+                path = row_data[-1]
+                cv2.imwrite(path, rgb_small)
+                
+                # Save CSV row
+                local_writer.writerow(row_data)
+                
+                if i % 50 == 0:
+                    print(f"\rSaved {i}/{len(ram_buffer)}...", end="")
+            except Exception as e:
+                print(f"[Save Error] {e}")
+                
+    print(f"\rSaved {len(ram_buffer)} frames successfully!          ")
+    ram_buffer.clear()
+
+def delete_last_n(n):
+    global frame_idx, ram_buffer
+    if not ram_buffer:
+        print("\nBuffer empty, nothing to delete")
+        return
+        
+    n = min(n, len(ram_buffer))
+    # Remove from RAM buffer
+    del ram_buffer[-n:]
     frame_idx -= n
-    print(f"\nDeleted last {n} frames -> now at {frame_idx}")
+    print(f"\nDeleted last {n} frames from RAM -> now at {frame_idx}")
 
 def delete_current_session():
-    global frame_idx, csv_file, writer, RUN_DIR, csv_path
+    global frame_idx, ram_buffer, RUN_DIR, csv_path
     confirm = input(f"\nDelete current session '{RUN_DIR}'? [y/N]: ").strip().lower()
     if confirm == 'y':
-        try:
-            csv_file.close()
-        except Exception:
-            pass
-        for fname in os.listdir(RUN_DIR):
-            try:
-                os.remove(os.path.join(RUN_DIR, fname))
-            except Exception:
-                pass
+        ram_buffer.clear()
+        frame_idx = 0
+        print(f"Session cleared from RAM!")
+        # No need to delete files since we haven't written them yet
         try:
             os.rmdir(RUN_DIR)
         except Exception:
@@ -279,8 +257,13 @@ def delete_current_session():
         print(f"Session '{RUN_DIR}' deleted!")
         RUN_DIR = create_new_session()
         csv_path = os.path.join(RUN_DIR, "dataset.csv")
-        csv_file = open(csv_path, "w", newline="")
-        writer = csv.writer(csv_file)
+        
+        # Initialize new CSV with header
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["timestamp","steer_us","throttle_us","steer_norm","throttle_norm","depth_front","rgb_path"])
+            
+        print(f"New session started: {RUN_DIR}")
         writer.writerow(["timestamp","steer_us","throttle_us","steer_norm","throttle_norm","depth_front","rgb_path"])
         frame_idx = 0
 
@@ -383,20 +366,20 @@ try:
                 if rgb is not None:
                     rgb_path = os.path.join(RUN_DIR, f"rgb_{frame_idx:05d}.png")
                     
-                    # Prepare data for async save
+                    # Prepare data for RAM buffer
                     row_data = [time.time(), steer_us, throttle_us,
                                 pwm_to_norm(steer_us), pwm_to_norm(throttle_us),
                                 depth_front, rgb_path]
                     
-                    # Offload to thread (pass full RGB and target size)
-                    saver.save(save_task, rgb, rgb_path, row_data, writer, csv_file, (cfg.IMG_WIDTH, cfg.IMG_HEIGHT))
+                    # Store in RAM (Full RGB + Metadata)
+                    ram_buffer.append((rgb, row_data))
                     
                     frame_idx += 1
                     last_save_time = now
                     
                     # Print status less frequently to avoid terminal blocking
                     if frame_idx % 10 == 0:
-                        print(f"\rFrame {frame_idx:05d} | S {pwm_to_norm(steer_us):+0.3f} | "
+                        print(f"\rRAM Buffer: {len(ram_buffer)} | S {pwm_to_norm(steer_us):+0.3f} | "
                               f"T {pwm_to_norm(throttle_us):+0.3f} | Depth {depth_front:.2f}", end="")
 
         time.sleep(0.001) # Reduced sleep to 1ms for higher polling rate
@@ -405,11 +388,7 @@ except KeyboardInterrupt:
     print("\nStopping...")
 
 finally:
-    saver.stop()
-    try:
-        csv_file.close()
-    except Exception:
-        pass
+    save_buffer_to_disk()
     neutralize()
     pygame.quit()
     try:
