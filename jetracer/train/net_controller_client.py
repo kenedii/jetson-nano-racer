@@ -21,10 +21,10 @@ JETSON_PORT = int(os.environ.get("JETSON_PORT", "5007"))
 SEND_HZ = 40.0
 AXIS_DEADZONE = 0.03
 STEERING_AXIS = 0          # left stick X
-THROTTLE_AXIS = 1          # left stick Y (invert below)
-USE_TRIGGERS_MODE3 = True  # RT accelerate, LT brake/reverse (original wiring behavior)
-RIGHT_TRIGGER_AXIS = 5
-LEFT_TRIGGER_AXIS = 2
+USE_TRIGGERS_MODE3 = True  # always use triggers for throttle/brake
+RIGHT_TRIGGER_AXIS = int(os.environ.get("RIGHT_TRIGGER_AXIS", "5"))
+LEFT_TRIGGER_AXIS = int(os.environ.get("LEFT_TRIGGER_AXIS", "2"))
+DEBUG_TRIGGERS = os.environ.get("DEBUG_TRIGGERS", "0").lower() in ("1", "true", "yes")
 
 
 def apply_deadzone(v, dz=AXIS_DEADZONE):
@@ -46,24 +46,24 @@ def main():
     next_send = time.time()
 
     counter = 0
+    next_debug = time.time()
     try:
         while True:
             pygame.event.pump()
             # Steering
             raw_steer = -js.get_axis(STEERING_AXIS)  # invert to match car mapping
             steer = apply_deadzone(raw_steer)
-            # Throttle
-            if USE_TRIGGERS_MODE3:
-                rt = (js.get_axis(RIGHT_TRIGGER_AXIS) + 1.0) / 2.0
-                lt = (js.get_axis(LEFT_TRIGGER_AXIS) + 1.0) / 2.0
-                if rt < AXIS_DEADZONE:
-                    rt = 0.0
-                if lt < AXIS_DEADZONE:
-                    lt = 0.0
-                throttle = rt - lt  # -1..1
-            else:
-                raw_thr = -js.get_axis(THROTTLE_AXIS)
-                throttle = apply_deadzone(raw_thr)
+            # Throttle via triggers only (RT accelerate, LT brake/reverse)
+            rt = (js.get_axis(RIGHT_TRIGGER_AXIS) + 1.0) / 2.0
+            lt = (js.get_axis(LEFT_TRIGGER_AXIS) + 1.0) / 2.0
+            if rt < AXIS_DEADZONE:
+                rt = 0.0
+            if lt < AXIS_DEADZONE:
+                lt = 0.0
+            throttle = rt - lt  # -1..1
+            if DEBUG_TRIGGERS and time.time() >= next_debug:
+                print(f"[TRIG] rt_raw={js.get_axis(RIGHT_TRIGGER_AXIS):+.3f} lt_raw={js.get_axis(LEFT_TRIGGER_AXIS):+.3f} rt={rt:+.2f} lt={lt:+.2f} throttle={throttle:+.2f}")
+                next_debug = time.time() + 0.5
 
             # Clamp
             steer = max(min(steer, 1.0), -1.0)
