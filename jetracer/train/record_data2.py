@@ -302,8 +302,8 @@ def network_listener():
     recv_count = 0
     while True:
         try:
-            # Wait up to 50ms for data, then drain everything available to keep only the latest
-            ready, _, _ = select.select([sock], [], [], 0.05)
+            # Wait up to 20ms for data, then drain everything available to keep only the latest
+            ready, _, _ = select.select([sock], [], [], 0.02)
             if not ready:
                 continue
 
