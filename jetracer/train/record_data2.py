@@ -302,8 +302,10 @@ def apply_deadzone(value, threshold=cfg.AXIS_DEADZONE):
     return 0.0 if abs(value) < threshold else value
 
 # ================= MAIN LOOP =================
-last_steer = STEERING_CENTER
-last_throttle = THROTTLE_CENTER
+last_steer_sent = -1
+last_throttle_sent = -1
+last_steer_rec = STEERING_CENTER
+last_throttle_rec = THROTTLE_CENTER
 MIN_CHANGE_US = 15
 
 try:
@@ -347,18 +349,21 @@ try:
         steer_us = int(STEERING_CENTER + steer * (STEERING_MAX - STEERING_CENTER))
         throttle_us = int(THROTTLE_CENTER + throttle_axis * (THROTTLE_MAX - THROTTLE_CENTER))
 
-        # Send to PCA
-        try:
-            pca.set_us(cfg.STEERING_CHANNEL, steer_us)
-            pca.set_us(cfg.THROTTLE_CHANNEL, throttle_us)
-        except Exception as e:
-            print(f"[PCA ERROR] {e}")
+        # Send to PCA ONLY if changed (reduces I2C bus congestion)
+        if steer_us != last_steer_sent or throttle_us != last_throttle_sent:
+            try:
+                pca.set_us(cfg.STEERING_CHANNEL, steer_us)
+                pca.set_us(cfg.THROTTLE_CHANNEL, throttle_us)
+                last_steer_sent = steer_us
+                last_throttle_sent = throttle_us
+            except Exception as e:
+                print(f"[PCA ERROR] {e}")
 
         # Recording & saving at TARGET_FPS
         now = time.time()
         if recording and now - last_save_time >= 1.0 / cfg.TARGET_FPS:
-            if abs(steer_us - last_steer) >= MIN_CHANGE_US or abs(throttle_us - last_throttle) >= MIN_CHANGE_US:
-                last_steer, last_throttle = steer_us, throttle_us
+            if abs(steer_us - last_steer_rec) >= MIN_CHANGE_US or abs(throttle_us - last_throttle_rec) >= MIN_CHANGE_US:
+                last_steer_rec, last_throttle_rec = steer_us, throttle_us
                 rgb, depth_front = get_rgb_and_front_depth()
                 if rgb is not None:
                     rgb_path = os.path.join(RUN_DIR, f"rgb_{frame_idx:05d}.png")
@@ -376,7 +381,7 @@ try:
                     print(f"\rFrame {frame_idx:05d} | S {pwm_to_norm(steer_us):+0.3f} | "
                           f"T {pwm_to_norm(throttle_us):+0.3f} | Depth {depth_front:.2f}", end="")
 
-        time.sleep(0.01)
+        time.sleep(0.001) # Reduced sleep to 1ms for higher polling rate
 
 except KeyboardInterrupt:
     print("\nStopping...")
