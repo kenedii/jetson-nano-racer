@@ -22,6 +22,7 @@ from smbus2 import SMBus
 import cv2
 import realsense_full  # RealSense pipeline (your module)
 import numpy as np
+import select
 
 # ================= INPUT MODE =================
 # Switch between local Xbox (direct USB/pygame) vs. network controller (from laptop)
@@ -295,14 +296,31 @@ def network_listener():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind((NET_HOST, NET_PORT))
-    sock.settimeout(0.2)  # avoid blocking forever on flaky links
+    sock.setblocking(False)  # non-blocking so we can drain bursts without queueing
     print(f"[NET] Listening for controller on udp://{NET_HOST}:{NET_PORT}")
 
     recv_count = 0
     while True:
         try:
-            data, _ = sock.recvfrom(256)
-            msg = json.loads(data.decode('utf-8'))
+            # Wait up to 50ms for data, then drain everything available to keep only the latest
+            ready, _, _ = select.select([sock], [], [], 0.05)
+            if not ready:
+                continue
+
+            drained = 0
+            last_msg = None
+            while True:
+                try:
+                    data, _ = sock.recvfrom(256)
+                    last_msg = data
+                    drained += 1
+                except BlockingIOError:
+                    break
+
+            if not last_msg:
+                continue
+
+            msg = json.loads(last_msg.decode('utf-8'))
             s = float(msg.get("s", 0.0))
             t = float(msg.get("t", 0.0))
             ts = float(msg.get("ts", time.time()))
@@ -314,10 +332,9 @@ def network_listener():
             net_throttle_norm = t
             # Use Jetson time for timeout logic to avoid clock skew with sender
             net_last_ts = arrival_ts
-            recv_count += 1
-            print(f"[NET RX] #{recv_count} s={s:+.2f} t={t:+.2f} ts={ts:.2f} arrival={arrival_ts:.2f}")
-        except socket.timeout:
-            continue
+            recv_count += drained
+            # Log the last (freshest) packet in the drained batch; note how many were batched
+            print(f"[NET RX] #{recv_count} (drained {drained}) s={s:+.2f} t={t:+.2f} ts={ts:.2f} arrival={arrival_ts:.2f}")
         except Exception as e:
             print(f"[NET] recv error: {e}")
 
