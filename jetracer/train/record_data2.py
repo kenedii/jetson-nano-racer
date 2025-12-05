@@ -333,8 +333,7 @@ def network_listener():
             # Use Jetson time for timeout logic to avoid clock skew with sender
             net_last_ts = arrival_ts
             recv_count += drained
-            # Log the last (freshest) packet in the drained batch; note how many were batched
-            print(f"[NET RX] #{recv_count} (drained {drained}) s={s:+.2f} t={t:+.2f} ts={ts:.2f} arrival={arrival_ts:.2f}")
+            # print(f"[NET RX] #{recv_count} (drained {drained}) s={s:+.2f} t={t:+.2f} ts={ts:.2f} arrival={arrival_ts:.2f}")
         except Exception as e:
             print(f"[NET] recv error: {e}")
 
