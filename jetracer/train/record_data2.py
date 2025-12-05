@@ -21,6 +21,10 @@ import cv2
 import realsense_full  # RealSense pipeline (your module)
 import numpy as np
 
+# ================= DEBUG/DIAG FLAGS =================
+# Set to False to bypass camera during recording (for lag diagnostics)
+CAMERA_ENABLED = True
+
 # ================= RAM BUFFER =================
 # Stores tuples of (rgb_image, row_data)
 ram_buffer = []
@@ -178,6 +182,9 @@ def pwm_to_norm(us):
     return (us - 1500) / 500.0
 
 def get_rgb_and_front_depth():
+    if not CAMERA_ENABLED:
+        return None, 0.0
+
     # Use optimized fetch: RGB frame + center depth float (already aligned)
     rgb, center_depth = realsense_full.get_aligned_frames()
     if rgb is None:
@@ -357,10 +364,11 @@ last_steer_sent = -1
 last_throttle_sent = -1
 
 # Start camera pipeline immediately to avoid startup lag when recording begins
-try:
-    realsense_full.start_pipeline()
-except Exception as e:
-    print(f"Warning: Camera failed to start: {e}")
+if CAMERA_ENABLED:
+    try:
+        realsense_full.start_pipeline()
+    except Exception as e:
+        print(f"Warning: Camera failed to start: {e}")
 
 try:
     # Ensure neutral at start
@@ -427,8 +435,9 @@ finally:
     save_buffer_to_disk()
     neutralize()
     pygame.quit()
-    try:
-        realsense_full.stop_pipeline()
-    except Exception as e:
-        print(f"[RealSense stop error] {e}")
+    if CAMERA_ENABLED:
+        try:
+            realsense_full.stop_pipeline()
+        except Exception as e:
+            print(f"[RealSense stop error] {e}")
     print(f"\nDATA SAVED -> {RUN_DIR}")
