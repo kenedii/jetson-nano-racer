@@ -2,10 +2,41 @@
 import pyrealsense2 as rs
 import numpy as np
 import cv2
+import time
 
 # Global objects - created once
 pipeline = None
 align = None
+# Store only RGB frame and the center depth value (float) to minimize bandwidth/CPU
+latest_frames = {"rgb": None, "depth_center": 0.0}
+import threading
+frame_lock = threading.Lock()
+stop_event = threading.Event()
+
+def camera_worker():
+    """Background fetcher: copies RGB, reads center depth only (float)."""
+    global latest_frames
+    while not stop_event.is_set():
+        try:
+            frames = pipeline.wait_for_frames(timeout_ms=2000)
+            aligned = align.process(frames)
+            
+            color_frame = aligned.get_color_frame()
+            depth_frame = aligned.get_depth_frame()
+
+            if color_frame and depth_frame:
+                rgb = np.asanyarray(color_frame.get_data()).copy()
+
+                # Read only center depth to avoid copying the whole depth map (~600KB/frame)
+                w = depth_frame.get_width()
+                h = depth_frame.get_height()
+                depth_center = float(depth_frame.get_distance(w // 2, h // 2))
+
+                with frame_lock:
+                    latest_frames["rgb"] = rgb
+                    latest_frames["depth_center"] = depth_center
+        except Exception as e:
+            print(f"[RealSense Thread Error] {e}")
 
 def start_pipeline():
     global pipeline, align
@@ -13,28 +44,51 @@ def start_pipeline():
         pipeline = rs.pipeline()
         config = rs.config()
 
-        # Enable the three streams we need
-        config.enable_stream(rs.stream.color, 1280, 720, rs.format.rgb8, 30)
-        # Note: '1' is the index for the left IR camera on most D400 series
-        config.enable_stream(rs.stream.infrared, 1, 1280, 720, rs.format.y8, 30)
-        config.enable_stream(rs.stream.depth, 1280, 720, rs.format.z16, 30)
+        # Enable ONLY RGB and Depth streams (Disable IR to save USB bandwidth/CPU)
+        # Reduced resolution + 15 FPS to lower CPU load on Jetson Nano
+        config.enable_stream(rs.stream.color, 424, 240, rs.format.rgb8, 15)
+        config.enable_stream(rs.stream.depth, 424, 240, rs.format.z16, 15)
+        # config.enable_stream(rs.stream.infrared, 1, 640, 480, rs.format.y8, 15) # DISABLED
 
         pipeline.start(config)
 
         # FIX: Align depth and IR to the color image by passing rs.stream.color
         align = rs.align(rs.stream.color)
         print("[RealSense] Pipeline started - RGB + IR + Depth ready")
+        
+        # Start background thread
+        t = threading.Thread(target=camera_worker, daemon=True)
+        t.start()
 
+def stop_pipeline():
+    global pipeline, align
+    stop_event.set()
+    # Give the thread a moment to exit the loop
+    time.sleep(0.5)
+    if pipeline:
+        try:
+            pipeline.stop()
+        except Exception as e:
+            print(f"[RealSense] Error stopping pipeline: {e}")
+        pipeline = None
+        align = None
+    print("[RealSense] Pipeline stopped.")
+
+def get_aligned_frames():
+    """Returns (rgb, depth_center_float) with single lock acquisition"""
+    start_pipeline()
+    with frame_lock:
+        if latest_frames["rgb"] is None:
+            return None, None
+        return latest_frames["rgb"], latest_frames["depth_center"]
 
 # --------------------- RGB ---------------------
 def get_rgb_image():
     start_pipeline()
-    frames = pipeline.wait_for_frames()
-    aligned = align.process(frames)
-    color_frame = aligned.get_color_frame()
-    if not color_frame:
-        return None
-    return np.asanyarray(color_frame.get_data())  # RGB, shape (720,1280,3)
+    with frame_lock:
+        if latest_frames["rgb"] is None:
+            return None
+        return latest_frames["rgb"].copy()
 
 
 def save_rgb_image(filename):
@@ -50,15 +104,10 @@ def save_rgb_image(filename):
 # --------------------- IR (dots) ---------------------
 def get_ir_image():
     start_pipeline()
-    frames = pipeline.wait_for_frames()
-    aligned = align.process(frames)
-    # The left IR stream index is 1, as enabled in config.
-    ir_frame = aligned.get_infrared_frame(1)
-    if not ir_frame:
-        return None
-    ir = np.asanyarray(ir_frame.get_data())
-    # Convert single-channel IR (grayscale) to 3-channel for consistent model input/saving
-    return cv2.cvtColor(ir, cv2.COLOR_GRAY2BGR)
+    with frame_lock:
+        if latest_frames["ir"] is None:
+            return None
+        return latest_frames["ir"].copy()
 
 
 def save_ir_image(filename):
@@ -72,47 +121,27 @@ def save_ir_image(filename):
 
 # --------------------- DEPTH ---------------------
 def get_depth_image():
-    start_pipeline()
-    frames = pipeline.wait_for_frames()
-    aligned = align.process(frames)
-    depth_frame = aligned.get_depth_frame()
-    if not depth_frame:
-        return None
-    return np.asanyarray(depth_frame.get_data())  # uint16 in millimeters
+    # Depth map is no longer stored to reduce CPU. Return None to indicate unavailable.
+    return None
 
 
 def save_depth_image(filename, colored=True):
     depth = get_depth_image()
     if depth is None:
+        print("[Depth] Full depth map not stored (optimized mode).")
         return False
-
-    # Save raw 16-bit depth (perfect for later use)
-    raw_name = filename.replace(".png", "_raw.png")
-    cv2.imwrite(raw_name, depth)
-    print("[SAVED] Raw depth -> " + raw_name)
-
-    if colored:
-        # Scale depth for visualization (e.g., scale 5 meters (5000mm) to 255)
-        vis = cv2.applyColorMap(cv2.convertScaleAbs(depth, alpha=255/5000), cv2.COLORMAP_JET)
-        color_name = filename.replace(".png", "_color.jpg")
-        cv2.imwrite(color_name, vis)
-        print("[SAVED] Depth color -> " + color_name)
-
-    return True
+    # If enabled in the future, the code below can run.
+    return False
 
 
 # --------------------- Distance helper ---------------------
 def get_center_distance():
-    depth = get_depth_image()
-    if depth is None:
+    _, depth_center = get_aligned_frames()
+    if depth_center is None:
         return 0
-    h, w = depth.shape
-    dist_mm = depth[h//2, w//2]
-    
-    # Depth value of 0 means no valid depth detected (e.g., outside range or reflective)
-    if dist_mm == 0:
+    if depth_center == 0:
         return 0
-    return dist_mm / 1000.0  # return meters
+    return depth_center
 
 
 # --------------------- Quick test ---------------------
