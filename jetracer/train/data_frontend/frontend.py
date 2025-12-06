@@ -1,11 +1,4 @@
-"""
-frontend.py
-Streamlit app to browse RC car run folders, view frames, visualize controls,
-delete bad frames, and bulk-remove frames where throttle_norm == 0.
-
-Run:
-    streamlit run frontend.py
-"""
+#frontend.py WITH SAFE CSV LOADING + THUMBNAILS VIEW
 
 import os
 import streamlit as st
@@ -14,142 +7,130 @@ from PIL import Image
 
 st.set_page_config(page_title="RC Car Dataset Viewer", layout="wide")
 
-
 # -------------------------
 # Utility functions
 # -------------------------
 
 def normalize_df_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Strip whitespace from column names to avoid KeyErrors."""
     df = df.copy()
     df.columns = [c.strip() for c in df.columns]
     return df
 
-
 def load_run_folders(root_dir: str):
-    """Return sorted list of subfolders starting with 'run_' in root_dir."""
     if not os.path.isdir(root_dir):
         return []
-    return sorted([d for d in os.listdir(root_dir) if d.startswith("run_") and os.path.isdir(os.path.join(root_dir, d))])
-
+    return sorted([
+        d for d in os.listdir(root_dir)
+        if d.startswith("run_") and os.path.isdir(os.path.join(root_dir, d))
+    ])
 
 def load_dataset(run_path: str):
-    """Load dataset.csv from run_path."""
     csv_path = os.path.join(run_path, "dataset.csv")
     if not os.path.exists(csv_path):
         return None, None
-    df = pd.read_csv(csv_path)
-    df = normalize_df_columns(df)
-    return df, csv_path
 
+    try:
+        df = pd.read_csv(csv_path)
+        df = normalize_df_columns(df)
+        return df, csv_path
+
+    except pd.errors.EmptyDataError:
+        st.warning(f"⚠️ dataset.csv in {run_path} is empty or corrupted. Skipping this run.")
+        return None, None
+
+    except Exception as e:
+        st.error(f"Failed to load {csv_path}: {e}")
+        return None, None
 
 def resolve_image_path(root_folder: str, raw_path: str) -> str:
-    """Normalize CSV image paths, safely resolving Windows/Linux inversions and avoiding double-root."""
     if raw_path is None:
         return ""
-
     p = str(raw_path).strip()
     if p == "":
         return ""
 
-    # If path is absolute already, normalize and return
     if os.path.isabs(p):
         return os.path.normpath(p)
 
-    # Normalize slashes for checking
-    p_forward = p.replace("\\", "/")
-
-    # Root dir base name (example: 'runs_rgb_depth')
+    p_fwd = p.replace("\\", "/")
     root_base = os.path.basename(root_folder).replace("\\", "/")
 
-    # If CSV path already begins with the root base (avoid duplicate join)
-    if p_forward.startswith(root_base + "/"):
-        # Join with parent of root_folder
+    if p_fwd.startswith(root_base + "/"):
         parent = os.path.dirname(root_folder)
-        candidate = os.path.normpath(os.path.join(parent, *p_forward.split("/")))
-        if os.path.exists(candidate):
-            return candidate
-        # fallback to joining with root_folder
-        alt = os.path.normpath(os.path.join(root_folder, *p_forward.split("/")))
-        if os.path.exists(alt):
-            return alt
+        candidate = os.path.normpath(os.path.join(parent, *p_fwd.split("/")))
+        if os.path.exists(candidate): return candidate
+        alt = os.path.normpath(os.path.join(root_folder, *p_fwd.split("/")))
+        if os.path.exists(alt): return alt
         return candidate
 
-    # Typical path: relative to selected root_folder
-    candidate = os.path.normpath(os.path.join(root_folder, *p_forward.split("/")))
-    if os.path.exists(candidate):
-        return candidate
+    candidate = os.path.normpath(os.path.join(root_folder, *p_fwd.split("/")))
+    if os.path.exists(candidate): return candidate
 
-    # Try as relative to current working directory
-    cwd_candidate = os.path.normpath(os.path.join(os.getcwd(), *p_forward.split("/")))
-    if os.path.exists(cwd_candidate):
-        return cwd_candidate
+    cwd_candidate = os.path.normpath(os.path.join(os.getcwd(), *p_fwd.split("/")))
+    if os.path.exists(cwd_candidate): return cwd_candidate
 
-    # Final fallback: return candidate (even if doesn't exist) so caller can report missing
     return candidate
 
-
 def delete_frame_and_image(df: pd.DataFrame, csv_path: str, index_to_delete: int, root_folder: str):
-    """Delete image file and CSV row. Returns updated df."""
     if index_to_delete < 0 or index_to_delete >= len(df):
         return df
 
     row = df.iloc[index_to_delete]
 
-    # support several column name variants
-    possible_keys = ["rgb_path", "rgbpath", "image_path", "image"]
-    rgb_key = next((k for k in possible_keys if k in df.columns), None)
+    for possible in ["rgb_path", "rgbpath", "image_path", "image"]:
+        if possible in df.columns:
+            rgb_key = possible
+            break
+    else:
+        rgb_key = None
 
-    # If no image column found, just remove row and save CSV
-    if rgb_key is None:
-        df = df.drop(index_to_delete).reset_index(drop=True)
-        df.to_csv(csv_path, index=False)
-        return df
-
-    raw_img = row[rgb_key]
-    img_full = resolve_image_path(root_folder, raw_img)
+    img_full = None
+    if rgb_key:
+        raw = row[rgb_key]
+        img_full = resolve_image_path(root_folder, raw)
 
     try:
         if img_full and os.path.exists(img_full):
             os.remove(img_full)
     except Exception as e:
-        st.warning(f"Failed to delete image file {img_full}: {e}")
+        st.warning(f"Failed to delete {img_full}: {e}")
 
     df = df.drop(index_to_delete).reset_index(drop=True)
     df.to_csv(csv_path, index=False)
     return df
 
+# -------------------------
+# Steering visualization
+# -------------------------
 
 def steering_visualization(steer_norm: float) -> str:
-    """
-    Interpret steer_norm so that:
-      - positive steer_norm => LEFT
-      - negative steer_norm => RIGHT
-    """
     try:
         s = float(steer_norm)
-    except Exception:
+    except:
         return "CENTER"
-    if s > 0.05:
-        return "LEFT"
-    elif s < -0.05:
-        return "RIGHT"
+    if s > 0.05: return "RIGHT"
+    if s < -0.05: return "LEFT"
     return "CENTER"
 
+# -------------------------
+# Frame counting
+# -------------------------
+
+def count_total_frames(root_folder: str) -> int:
+    total = 0
+    for run in load_run_folders(root_folder):
+        df, _ = load_dataset(os.path.join(root_folder, run))
+        if isinstance(df, pd.DataFrame):
+            total += len(df)
+    return total
 
 # -------------------------
-# Bulk Removal: throttle_norm == 0
+# Bulk removal
 # -------------------------
 
 def remove_zero_accel_frames(root_folder: str):
-    """
-    Delete all frames with throttle_norm == 0 in ALL run_* folders.
-    Returns a summary list of tuples: (run_name, before_count, after_count, removed_count)
-    """
-    runs = load_run_folders(root_folder)
     summary = []
-
-    for run in runs:
+    for run in load_run_folders(root_folder):
         run_path = os.path.join(root_folder, run)
         df, csv_path = load_dataset(run_path)
         if df is None:
@@ -160,13 +141,10 @@ def remove_zero_accel_frames(root_folder: str):
             continue
 
         before = len(df)
-        # indices to delete (list so we can reverse delete)
-        to_delete = df[df["throttle_norm"] == 0].index.tolist()
+        delete_indices = df[df["throttle_norm"] == 0].index.tolist()
 
         removed = 0
-        # iterate reversed so indices remain valid as we drop rows
-        for idx in reversed(to_delete):
-            # delete both file and row
+        for idx in reversed(delete_indices):
             df = delete_frame_and_image(df, csv_path, idx, root_folder)
             removed += 1
 
@@ -175,191 +153,263 @@ def remove_zero_accel_frames(root_folder: str):
 
     return summary
 
-
 # -------------------------
-# Helper: Count total frames across all runs
-# -------------------------
-def count_total_frames(root_folder: str) -> int:
-    total = 0
-    runs = load_run_folders(root_folder)
-    for run in runs:
-        run_path = os.path.join(root_folder, run)
-        df, _ = load_dataset(run_path)
-        if df is None:
-            continue
-        total += len(df)
-    return total
-
-
-# -------------------------
-# Streamlit UI
+# UI
 # -------------------------
 st.title("📊 RC Car Dataset Viewer & Cleaner")
 
-root_folder = st.text_input("Root folder containing run_YYYYMMDD_HHMMSS folders (full path):")
+root_folder = st.text_input("Root folder containing run_* folders:")
 
-# Show total frames across all runs (if folder valid)
 if root_folder and os.path.isdir(root_folder):
-    total_frames = count_total_frames(root_folder)
-    st.markdown(f"**Total Frames Across All Runs:** {total_frames}")
+    st.markdown(f"**Total Frames Across ALL Runs:** {count_total_frames(root_folder)}")
 
 st.markdown("---")
 
-# Bulk Remove Zero Accel
+# Bulk cleanup
 if root_folder and os.path.isdir(root_folder):
-    st.markdown("### 🧹 Bulk Cleanup Tool")
-    if st.button("🔥 Remove ALL frames with throttle_norm == 0 (across ALL runs)"):
+    st.markdown("### 🧹 Bulk Cleanup")
+    if st.button("🔥 Remove ALL throttle_norm == 0 frames"):
         summary = remove_zero_accel_frames(root_folder)
         st.success("Bulk cleanup complete.")
         for run, before, after, removed in summary:
-            st.write(f"**{run}** — {before} → {after} (removed {removed})")
-        # refresh total
-        total_frames = count_total_frames(root_folder)
-        st.write(f"Updated total frames: **{total_frames}**")
+            st.write(f"{run}: {before} → {after} (removed {removed})")
+        st.write(f"Updated total: **{count_total_frames(root_folder)}**")
 
 st.markdown("---")
 
+# Main viewer
 if root_folder:
     if not os.path.isdir(root_folder):
-        st.error("Provided root folder does not exist.")
+        st.error("Invalid root folder.")
         st.stop()
 
-    run_folders = load_run_folders(root_folder)
-
-    if not run_folders:
-        st.warning("No folders starting with 'run_' found.")
+    runs = load_run_folders(root_folder)
+    if not runs:
+        st.warning("No run_* folders found.")
         st.stop()
 
-    selected_run = st.selectbox("Select a run folder:", run_folders)
+    selected_run = st.selectbox("Select a run:", runs)
 
-    if selected_run:
-        run_path = os.path.join(root_folder, selected_run)
-        df, csv_path = load_dataset(run_path)
-        if df is None:
-            st.error(f"No dataset.csv found inside {run_path}")
-            st.stop()
+    if "last_run" not in st.session_state:
+        st.session_state.last_run = None
 
-        df = normalize_df_columns(df)
+    if st.session_state.last_run != selected_run:
+        st.session_state.idx = 0
+        st.session_state.last_run = selected_run
 
-        if "idx" not in st.session_state:
+    run_path = os.path.join(root_folder, selected_run)
+    df, csv_path = load_dataset(run_path)
+
+    if df is None:
+        st.error("This run has no valid dataset.csv.")
+        st.stop()
+
+    df = normalize_df_columns(df)
+
+    if "idx" not in st.session_state:
+        st.session_state.idx = 0
+
+    idx = st.session_state.idx
+
+    # Navigation
+    col_prev, col_mid, col_next = st.columns([1, 1, 1])
+
+    if col_prev.button("⬅️ Previous"):
+        st.session_state.idx = max(0, idx - 1)
+
+    if col_next.button("Next ➡️"):
+        st.session_state.idx = min(len(df) - 1, idx + 1)
+
+    idx = st.session_state.idx
+    row = df.iloc[idx]
+
+    # Find image path
+    image_col = None
+    for c in ["rgb_path", "rgbpath", "image_path", "image"]:
+        if c in df.columns:
+            image_col = c
+            break
+
+    raw_img_path = row[image_col] if image_col else ""
+    img_full = resolve_image_path(root_folder, raw_img_path)
+
+    img_col, info_col = st.columns([4, 2])
+
+    if os.path.exists(img_full):
+        img = Image.open(img_full)
+        img_col.image(img, caption=f"Frame {idx+1}/{len(df)}", use_column_width=True)
+    else:
+        img_col.error(f"Image not found: {img_full}")
+
+    # Info
+    info_col.subheader("Frame Info")
+
+    throttle = float(row.get("throttle_norm", 0.0))
+    steer = float(row.get("steer_norm", 0.0))
+
+    info_col.write("**Throttle:**")
+    info_col.progress(min(max(throttle, 0.0), 1.0))
+
+    left_strength = max(0.0, steer)
+    right_strength = max(0.0, -steer)
+
+    info_col.write("**Steering**")
+    info_col.progress(left_strength, text="Left Turn")
+    info_col.progress(right_strength, text="Right Turn")
+
+    label = steering_visualization(steer)
+    if label == "LEFT":
+        info_col.write("**Steering:** ⬅️ LEFT")
+    elif label == "RIGHT":
+        info_col.write("**Steering:** ➡️ RIGHT")
+    else:
+        info_col.write("**Steering:** ⏺ CENTER")
+
+    # Delete frame
+    st.markdown("---")
+    if st.button("🗑 Delete this frame"):
+        df = delete_frame_and_image(df, csv_path, idx, root_folder)
+        st.success(f"Deleted frame {idx}")
+        if len(df) == 0:
             st.session_state.idx = 0
-
-        # Navigation arrows
-        col_prev, col_center, col_next = st.columns([1, 1, 1])
-
-        if col_prev.button("⬅️ Previous"):
-            st.session_state.idx = max(0, st.session_state.idx - 1)
-
-        if col_next.button("Next ➡️"):
-            st.session_state.idx = min(len(df) - 1, st.session_state.idx + 1)
-
-        # Arrow-key JS
-        st.markdown(
-            """
-            <script>
-            document.addEventListener('keydown', function(e) {
-                if (e.key === 'ArrowLeft') {
-                    window.location.href += (window.location.href.indexOf('?') === -1 ? '?' : '&') + 'prev=true';
-                }
-                if (e.key === 'ArrowRight') {
-                    window.location.href += (window.location.href.indexOf('?') === -1 ? '?' : '&') + 'next=true';
-                }
-            });
-            </script>
-            """,
-            unsafe_allow_html=True,
-        )
-
-        params = st.experimental_get_query_params()
-        if "prev" in params:
-            st.session_state.idx = max(0, st.session_state.idx - 1)
-            st.experimental_set_query_params()
-        if "next" in params:
-            st.session_state.idx = min(len(df) - 1, st.session_state.idx + 1)
-            st.experimental_set_query_params()
-
-        idx = min(max(0, st.session_state.idx), len(df) - 1)
-        st.session_state.idx = idx
-
-        row = df.iloc[idx]
-
-        # Determine image column
-        image_col = None
-        for c in ["rgb_path", "rgbpath", "image_path", "image"]:
-            if c in df.columns:
-                image_col = c
-                break
-        if image_col is None:
-            for c in df.columns:
-                if "rgb" in c.lower() or "img" in c.lower():
-                    image_col = c
-                    break
-
-        raw_img_path = row[image_col] if image_col else ""
-        img_full_path = resolve_image_path(root_folder, raw_img_path)
-
-        # Wider image column to restore larger image display
-        img_col, info_col = st.columns([4, 2])
-
-        if not img_full_path or not os.path.exists(img_full_path):
-            img_col.error(f"Image not found: {img_full_path}")
         else:
-            try:
-                img = Image.open(img_full_path)
-                img_col.image(img, caption=f"Frame {idx+1}/{len(df)}", use_column_width=True)
-            except Exception as e:
-                img_col.error(f"Failed to open image {img_full_path}: {e}")
+            st.session_state.idx = min(idx, len(df) - 1)
+        st.experimental_rerun()
 
-        # Frame info
-        info_col.subheader("Frame Information")
-        if "timestamp" in df.columns:
-            info_col.write(f"**Timestamp:** {row['timestamp']}")
-        if "depth_front" in df.columns:
-            info_col.write(f"**Depth (front):** {row['depth_front']}")
+    st.markdown("---")
+    st.write(f"Run: {selected_run} — Frames: {len(df)}")
 
-        throttle_norm = float(row["throttle_norm"]) if "throttle_norm" in df.columns else 0.0
-        steer_norm = float(row["steer_norm"]) if "steer_norm" in df.columns else 0.0
+    # -------------------------
+    # THUMBNAIL STRIP (10 images)
+    # -------------------------
 
-        info_col.write("**Throttle (normalized):**")
-        try:
-            info_col.progress(min(max(float(throttle_norm), 0.0), 1.0))
-        except:
-            info_col.progress(0.0)
+    st.subheader("Thumbnail Strip (click to jump)")
 
-        # Fixed left/right visualization (interpreting positive = LEFT, negative = RIGHT)
-        info_col.markdown("**Steering**")
-        # Now positive steer_norm -> left bar, negative -> right bar
-        left_strength = max(0.0, float(steer_norm))   # positive => left
-        right_strength = max(0.0, -float(steer_norm))  # negative => right
+    thumbs_per_row = 10
+    start = max(0, idx - thumbs_per_row//2)
+    end = min(len(df), start + thumbs_per_row)
 
-        # Show left then right so user reads left->right naturally
-        info_col.progress(left_strength, text="Left Turn")
-        info_col.progress(right_strength, text="Right Turn")
+    thumb_cols = st.columns(end - start)
 
-        steer_label = steering_visualization(steer_norm)
-        if steer_label == "LEFT":
-            info_col.write("**Steering:** ⬅️ LEFT")
-        elif steer_label == "RIGHT":
-            info_col.write("**Steering:** ➡️ RIGHT")
-        else:
-            info_col.write("**Steering:** ⏺ CENTER")
+    for i, c in enumerate(range(start, end)):
+        row_thumb = df.iloc[c]
+        raw_p = row_thumb[image_col] if image_col else ""
+        img_p = resolve_image_path(root_folder, raw_p)
 
-        # Delete button
-        st.markdown("---")
-        st.write("Delete this frame permanently.")
-        if st.button("🗑️ Delete this frame"):
-            df = delete_frame_and_image(df, csv_path, idx, root_folder)
-            st.success(f"Deleted frame {idx}.")
-            new_len = len(df)
-            if new_len == 0:
-                st.session_state.idx = 0
-            else:
-                st.session_state.idx = min(idx, new_len - 1)
-            # update top total by rerunning
+        if os.path.exists(img_p):
+            im = Image.open(img_p)
+            thumb_cols[i].image(im, use_column_width=True)
+
+        if thumb_cols[i].button(f"Go {c}"):
+            st.session_state.idx = c
             st.experimental_rerun()
 
-        st.markdown("---")
-        st.write(f"**Run:** {selected_run} — **Frames:** {len(df)}")
+    # Preview nearby rows
+    with st.expander("DataFrame Preview:"):
+        st.write(df.iloc[max(0, idx-2): idx+3])
 
-        with st.expander("Preview dataframe rows:"):
-            st.write(df.iloc[max(0, idx - 2): idx + 3])
+# ---------------------------
+# CONFIGURATION
+# ---------------------------
+DATA_ROOT = "sessions"  # Root folder containing all sessions
+
+
+# ---------------------------
+# UTILITY FUNCTIONS
+# ---------------------------
+
+def load_frame(session, index):
+    """Load a single frame: image + metadata JSON."""
+    session_path = os.path.join(DATA_ROOT, session)
+
+    img_path = os.path.join(session_path, f"{index}.jpg")
+    meta_path = os.path.join(session_path, f"{index}.json")
+
+    if not os.path.exists(img_path) or not os.path.exists(meta_path):
+        return None, None
+
+    img = Image.open(img_path)
+    with open(meta_path, "r") as f:
+        meta = json.load(f)
+    return img, meta
+
+
+def get_num_frames(session):
+    session_path = os.path.join(DATA_ROOT, session)
+    frames = [f for f in os.listdir(session_path) if f.endswith(".jpg")]
+    return len(frames)
+
+
+# ---------------------------
+# STREAMLIT UI
+# ---------------------------
+st.set_page_config(page_title="RC Car Data Viewer", layout="wide")
+st.title("🚗 RC Car Dataset Viewer")
+
+# Session selection
+sessions = [d for d in os.listdir(DATA_ROOT) if os.path.isdir(os.path.join(DATA_ROOT, d))]
+session = st.sidebar.selectbox("Select Session", sessions)
+
+if not session:
+    st.stop()
+
+num_frames = get_num_frames(session)
+st.sidebar.write(f"Total frames: {num_frames}")
+
+# Frame index slider
+frame_index = st.sidebar.number_input(
+    "Frame Index", min_value=0, max_value=max(0, num_frames - 1), value=0, step=1
+)
+
+# Load frame
+img, meta = load_frame(session, frame_index)
+
+if img is None:
+    st.error("Frame not found.")
+    st.stop()
+
+# ---------------------------
+# FIX: Steering label flipped
+# If steering < 0 → RIGHT; steering > 0 → LEFT
+# ---------------------------
+steer_value = meta.get("steering", 0)
+throttle_value = meta.get("throttle", 0)
+
+if steer_value < 0:
+    steer_label = "➡️ RIGHT"
+elif steer_value > 0:
+    steer_label = "⬅️ LEFT"
+else:
+    steer_label = "⬆️ STRAIGHT"
+
+# Display main frame + metadata
+col1, col2 = st.columns([2, 1])
+
+with col1:
+    st.image(img, caption=f"Frame {frame_index}", use_column_width=True)
+
+with col2:
+    st.subheader("Metadata")
+    st.write(f"**Steering:** {steer_label}")
+    st.write(f"**Steering Raw:** {steer_value:.3f}")
+    st.write(f"**Throttle:** {throttle_value:.3f}")
+    st.write(meta)
+
+# -------------------------------------------
+# NEW FEATURE: Thumbnail viewer (10 images)
+# -------------------------------------------
+st.subheader("Thumbnail Preview")
+
+THUMB_WINDOW = 10
+start_index = max(0, frame_index - (THUMB_WINDOW // 2))
+end_index = min(num_frames, start_index + THUMB_WINDOW)
+
+thumb_cols = st.columns(10)
+
+for i, idx in enumerate(range(start_index, end_index)):
+    thumb_img, _ = load_frame(session, idx)
+    if thumb_img:
+        thumb_cols[i].image(thumb_img.resize((120, 80)))
+        if thumb_cols[i].button(f"Go {idx}"):
+            st.experimental_set_query_params(frame=idx)
+            st.rerun()
