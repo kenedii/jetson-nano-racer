@@ -1,16 +1,21 @@
 # requirements.txt
 # ----------------
-# PyTorch nightly versions for CUDA 12.9
+# PyTorch nightly versions for CUDA 12.9 (Windows)
 # Install by running: pip install -r requirements.txt
-# If you have a different GPU/CUDA version, change the URL accordingly:
+# If you have a different GPU/CUDA version, change the URLs accordingly:
 # https://pytorch.org/get-started/locally/
 
 --pre
---index-url https://download.pytorch.org/whl/nightly/cu129
 
+# Install torch for CUDA 12.9
+--index-url https://download.pytorch.org/whl/nightly/cu129
 torch==2.10.0.dev20251206+cu129
-torchvision==0.25.0.dev20251206+cu129
-torchaudio==2.10.0.dev20251206+cu129
+
+# torchvision and torchaudio are not yet available for cu129,
+# so install the latest compatible versions for CUDA 12.6
+--index-url https://download.pytorch.org/whl/nightly/cu126
+torchvision==0.25.0.dev20251206+cu126
+torchaudio==2.10.0.dev20251206+cu126
 
 # Other dependencies
 pandas==2.3.3
@@ -19,8 +24,22 @@ scikit-learn==1.7.2
 matplotlib==3.10.7
 tqdm==4.67.1
 
+# ----------------
 # Example for a different CUDA version:
 # --index-url https://download.pytorch.org/whl/nightly/cu118
 # torch==2.10.0.dev20251206+cu118
 # torchvision==0.25.0.dev20251206+cu118
 # torchaudio==2.10.0.dev20251206+cu118
+
+# ----------------
+# Example for M-series Mac (Apple Silicon) using native GPU (MPS backend)
+# --index-url https://download.pytorch.org/whl/nightly/cpu
+# torch==2.10.0.dev20251206+cpu
+# torchvision==0.25.0.dev20251206+cpu
+# torchaudio==2.10.0.dev20251206+cpu
+# Other dependencies remain the same:
+# pandas==2.3.3
+# numpy==2.2.6
+# scikit-learn==1.7.2
+# matplotlib==3.10.7
+# tqdm==4.67.1
