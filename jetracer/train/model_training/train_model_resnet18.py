@@ -11,30 +11,33 @@ import matplotlib.pyplot as plt
 import os
 import time
 import sys
+import shutil
 from tqdm import tqdm
 from datetime import timedelta
 
 # ==================== CONFIGURATION ====================
-DATASET_PATH = 'combined_augmented_dataset.csv'   # Change this if needed
+DATASET_PATH = 'combined_augmented_dataset.csv'   # Change this as needed
 IMG_HEIGHT = 120
 IMG_WIDTH = 160
 NUM_PIXELS = IMG_HEIGHT * IMG_WIDTH
 BATCH_SIZE = 32
 NUM_EPOCHS = 50
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-VRAM_ALLOCATION = 0.5
+
+# Optional: limit VRAM usage (useful on Jetson / shared GPUs)
 if torch.cuda.is_available():
-    torch.cuda.set_per_process_memory_fraction(VRAM_ALLOCATION, 0)
+    torch.cuda.set_per_process_memory_fraction(0.75, 0)
+
 SAVE_DIR = 'checkpoints'
 os.makedirs(SAVE_DIR, exist_ok=True)
 
-# RGB column names
+# RGB column names: R1, G1, B1, R2, G2, B2, ...
 RGB_COLUMNS = [f'{c}{i}' for i in range(1, NUM_PIXELS + 1) for c in ['R', 'G', 'B']]
 
 # Loss weights: steering is 5× more important
 LOSS_WEIGHTS = torch.tensor([5.0, 1.0], device=DEVICE)  # [steer_norm, throttle_norm]
 
-# ==================== LOGGING SETUP (console + file) ====================
+# ==================== LOGGING SETUP ====================
 class Tee:
     def __init__(self, *files):
         self.files = files
@@ -51,15 +54,16 @@ temp_log_path = 'temp_training_log.txt'
 log_file = open(temp_log_path, 'w', encoding='utf-8')
 sys.stdout = Tee(sys.stdout, log_file)
 
-# ==================== PRINT SETUP INFO ====================
+# ==================== SETUP INFO ====================
 print("="*65)
-print("                JETRACER BEHAVIORAL CLONING TRAINING")
+print("           JETRACER BEHAVIORAL CLONING TRAINING")
 print("="*65)
 print(f"Dataset             : {DATASET_PATH}")
 print(f"Device              : {DEVICE}")
 if torch.cuda.is_available():
-    print(f"GPU                 : {torch.cuda.get_device_name(0)}")
-    print(f"GPU Memory          : {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+    props = torch.cuda.get_device_properties(0)
+    print(f"GPU                 : {props.name}")
+    print(f"GPU Memory          : {props.total_memory / 1e9:.1f} GB")
 print(f"Batch Size          : {BATCH_SIZE}")
 print(f"Epochs              : {NUM_EPOCHS}")
 print(f"Targets             : steer_norm, throttle_norm")
@@ -72,7 +76,7 @@ class CustomDataset(Dataset):
     def __init__(self, df):
         self.df = df.reset_index(drop=True)
         
-        # Reshape flat RGB columns → (3, 120, 160)
+        # Reshape RGB columns → (3, 120, 160)
         rgb_data = self.df[RGB_COLUMNS].values.astype(np.float32) / 255.0
         images = []
         for row in rgb_data:
@@ -103,19 +107,19 @@ num_workers = 0 if os.name == 'nt' else 4
 pin_memory = torch.cuda.is_available()
 
 train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True,
-                        num_workers=num_workers, pin_memory=pin_memory)
+                          num_workers=num_workers, pin_memory=pin_memory)
 test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False,
-                       num_workers=num_workers, pin_memory=pin_memory)
+                         num_workers=num_workers, pin_memory=pin_memory)
 
 print(f"Train batches       : {len(train_loader)}")
 print(f"Test batches        : {len(test_loader)}\n")
 
-# ==================== MODEL (ResNet18 + Tanh) ====================
+# ==================== MODEL ====================
 class ControlModel(nn.Module):
     def __init__(self):
         super().__init__()
         backbone = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
-        self.features = nn.Sequential(*list(backbone.children())[:-2])  # Up to last conv
+        self.features = nn.Sequential(*list(backbone.children())[:-2])
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         
         self.head = nn.Sequential(
@@ -126,7 +130,7 @@ class ControlModel(nn.Module):
             nn.ReLU(inplace=True),
             nn.Dropout(0.3),
             nn.Linear(128, 2),
-            nn.Tanh()  # Ensures output in [-1, 1]
+            nn.Tanh()  # Clamps output to [-1, 1]
         )
     
     def forward(self, x):
@@ -137,11 +141,11 @@ class ControlModel(nn.Module):
 
 model = ControlModel().to(DEVICE)
 
-# Save model architecture
+# Save architecture
 arch_path = os.path.join(SAVE_DIR, 'model_architecture.txt')
 with open(arch_path, 'w', encoding='utf-8') as f:
-    f.write("ControlModel (ResNet18 backbone + Tanh head)\n")
-    f.write("="*50 + "\n")
+    f.write("ControlModel - ResNet18 backbone + Tanh head\n")
+    f.write("="*60 + "\n")
     f.write(str(model))
 print(f"Model architecture saved → {arch_path}\n")
 
@@ -151,7 +155,11 @@ def weighted_mse_loss(pred, target):
 
 criterion = weighted_mse_loss
 optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)
-scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=0.5, verbose=True)
+
+# Fixed: verbose removed (not supported in older PyTorch)
+scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+    optimizer, mode='min', patience=5, factor=0.5
+)
 
 # ==================== TRAINING ====================
 history = {'epoch': [], 'train_loss': [], 'val_mae': [], 'val_r2': [], 'epoch_time': []}
@@ -196,7 +204,7 @@ for epoch in range(1, NUM_EPOCHS + 1):
     
     epoch_time = time.time() - epoch_start
     
-    # Log
+    # Logging
     history['epoch'].append(epoch)
     history['train_loss'].append(avg_train_loss)
     history['val_mae'].append(val_mae)
@@ -210,7 +218,7 @@ for epoch in range(1, NUM_EPOCHS + 1):
     
     scheduler.step(val_mae)
     
-    # Save latest
+    # Save models
     torch.save({
         'epoch': epoch,
         'model_state_dict': model.state_dict(),
@@ -218,30 +226,30 @@ for epoch in range(1, NUM_EPOCHS + 1):
         'val_mae': val_mae,
     }, os.path.join(SAVE_DIR, 'latest_model.pth'))
     
-    # Save best
     if val_mae < best_val_mae:
         best_val_mae = val_mae
         torch.save(model.state_dict(), os.path.join(SAVE_DIR, 'best_model.pth'))
         print(f"   New best model! Val MAE = {best_val_mae:.4f}")
 
-# ==================== FINAL RESULTS ===
+# ==================== FINAL RESULTS ====================
 total_time = time.time() - total_start_time
 print("\n" + "="*65)
 print("TRAINING COMPLETED!")
 print("="*65)
-print(f"Total time          : {str(timedelta(seconds=int(total_time)))}")
+print(f"Total training time : {str(timedelta(seconds=int(total_time)))}")
 print(f"Best Val MAE        : {best_val_mae:.4f}")
 print(f"Final Val MAE       : {val_mae:.4f}")
 print(f"Final Val R²        : {val_r2:.4f}")
 print(f"Final Steer MAE     : {steer_mae:.4f}")
-print(f"Final Throttle MAE     : {throttle_mae:.4f}")
+print(f"Final Throttle MAE  : {throttle_mae:.4f}")
 
 # Save history & plot
 pd.DataFrame(history).to_csv('training_history_normalized.csv', index=False)
+
 plt.figure(figsize=(15, 5))
-plt.subplot(1, 3, 1); plt.plot(history['epoch'], history['train_loss'], 'o-'); plt.title('Train Loss'); plt.grid()
-plt.subplot(1, 3, 2); plt.plot(history['epoch'], history['val_mae'], 'o-', color='orange'); plt.title('Val MAE'); plt.grid()
-plt.subplot(1, 3, 3); plt.plot(history['epoch'], history['val_r2'], 'o-', color='green'); plt.title('Val R²'); plt.grid()
+plt.subplot(1, 3, 1); plt.plot(history['epoch'], history['train_loss'], 'o-'); plt.title('Train Loss'); plt.grid(True)
+plt.subplot(1, 3, 2); plt.plot(history['epoch'], history['val_mae'], 'o-', color='orange'); plt.title('Validation MAE'); plt.grid(True)
+plt.subplot(1, 3, 3); plt.plot(history['epoch'], history['val_r2'], 'o-', color='green'); plt.title('Validation R²'); plt.grid(True)
 plt.tight_layout()
 plt.savefig('training_curves_normalized.png', dpi=200)
 plt.show()
@@ -249,8 +257,12 @@ plt.show()
 # ==================== FINALIZE LOGGING ====================
 sys.stdout = original_stdout
 log_file.close()
+
+# Windows-safe move
 final_log_path = os.path.join(SAVE_DIR, 'training_log.txt')
-os.replace(temp_log_path, final_log_path)  # Atomic move
+if os.path.exists(final_log_path):
+    os.remove(final_log_path)
+shutil.move(temp_log_path, final_log_path)
 
 print(f"\nAll files saved in './{SAVE_DIR}/':")
 print("   • best_model.pth")
@@ -261,4 +273,4 @@ print("   • training_history_normalized.csv")
 print("   • training_curves_normalized.png")
 
 print(f"\nTraining log saved → {final_log_path}")
-print("Ready for deployment!")
+print("Ready for inference on JetRacer!")
