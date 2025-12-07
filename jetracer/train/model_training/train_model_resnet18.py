@@ -23,10 +23,11 @@ NUM_PIXELS = IMG_HEIGHT * IMG_WIDTH
 BATCH_SIZE = 32
 NUM_EPOCHS = 50
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+VRAM_ALLOCATION = 0.5
 
-# Optional: limit VRAM usage (useful on Jetson / shared GPUs)
+# Optional: limit VRAM usage 
 if torch.cuda.is_available():
-    torch.cuda.set_per_process_memory_fraction(0.75, 0)
+    torch.cuda.set_per_process_memory_fraction(VRAM_ALLOCATION, 0)
 
 SAVE_DIR = 'checkpoints'
 os.makedirs(SAVE_DIR, exist_ok=True)
