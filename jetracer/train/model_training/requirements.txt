@@ -1,0 +1,26 @@
+# requirements.txt
+# ----------------
+# PyTorch nightly versions for CUDA 12.9
+# Install by running: pip install -r requirements.txt
+# If you have a different GPU/CUDA version, change the URL accordingly:
+# https://pytorch.org/get-started/locally/
+
+--pre
+--index-url https://download.pytorch.org/whl/nightly/cu129
+
+torch==2.10.0.dev20251206+cu129
+torchvision==0.25.0.dev20251206+cu129
+torchaudio==2.10.0.dev20251206+cu129
+
+# Other dependencies
+pandas==2.3.3
+numpy==2.2.6
+scikit-learn==1.7.2
+matplotlib==3.10.7
+tqdm==4.67.1
+
+# Example for a different CUDA version:
+# --index-url https://download.pytorch.org/whl/nightly/cu118
+# torch==2.10.0.dev20251206+cu118
+# torchvision==0.25.0.dev20251206+cu118
+# torchaudio==2.10.0.dev20251206+cu118
