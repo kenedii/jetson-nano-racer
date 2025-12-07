@@ -1,9 +1,9 @@
 """
-RC Car Dataset Viewer & Cleaner
-- Fixed: thumbnail clicks now work 100% reliably
-- Fixed: navigation (single click)
-- Fixed: broken CSV paths with runs_rgb_depth/...
-- Supports both CSV runs and old jpg+json sessions
+RC Car Dataset Viewer & Cleaner + Combined CSV Creator
+- View & clean runs
+- Delete frames
+- Bulk remove zero-throttle
+- Create full pixel-flattened combined_dataset.csv from all runs
 """
 
 import os
@@ -12,6 +12,7 @@ import streamlit as st
 import pandas as pd
 from PIL import Image
 from pathlib import Path
+import csv
 
 st.set_page_config(page_title="RC Car Dataset Viewer & Cleaner", layout="wide")
 
@@ -26,7 +27,7 @@ if "current_folder" not in st.session_state:
 THUMB_WINDOW = 10
 
 # -------------------------
-# Smart Path Resolver (fixes runs_rgb_depth/... fake paths)
+# Smart Path Resolver (fixes runs_rgb_depth/...)
 # -------------------------
 def resolve_image_path(root_folder: str, raw_path: str) -> str:
     if not raw_path or str(raw_path).strip() in ["", "nan", "None"]:
@@ -59,7 +60,117 @@ def resolve_image_path(root_folder: str, raw_path: str) -> str:
     return candidates[0] if candidates else os.path.join(root_folder, raw)
 
 # -------------------------
-# CSV Helpers
+# Combined CSV Creator (your script embedded)
+# -------------------------
+def create_combined_csv(root_dir: str):
+    output_csv = os.path.join(root_dir, "combined_dataset.csv")
+    
+    if os.path.exists(output_csv):
+        st.warning(f"combined_dataset.csv already exists. Overwriting...")
+
+    with st.spinner("Scanning runs and finding sample image..."):
+        subdirs = [d for d in os.listdir(root_dir) 
+                  if os.path.isdir(os.path.join(root_dir, d)) and d.startswith('run_')]
+        if not subdirs:
+            st.error("No run_* folders found.")
+            return
+
+        sample_image_path = None
+        for run_dir in subdirs:
+            run_path = os.path.join(root_dir, run_dir)
+            csv_path = os.path.join(run_path, "dataset.csv")
+            if not os.path.exists(csv_path):
+                continue
+            df_temp = pd.read_csv(csv_path)
+            img_col = next((c for c in df_temp.columns if any(x in c.lower() for x in ["rgb", "image", "path"])), None)
+            if img_col is None:
+                continue
+            for val in df_temp[img_col]:
+                if pd.notna(val):
+                    full_path = resolve_image_path(run_path, val)
+                    if os.path.exists(full_path):
+                        sample_image_path = full_path
+                        break
+            if sample_image_path:
+                break
+
+        if not sample_image_path:
+            st.error("Could not find any valid image in any run.")
+            return
+
+        img = Image.open(sample_image_path).convert('RGB')
+        width, height = img.size
+        num_pixels = width * height
+
+    # Build header
+    header = ['timestamp', 'steer_us', 'throttle_us', 'steer_norm', 'throttle_norm', 'depth_front']
+    for i in range(1, num_pixels + 1):
+        header.extend([f'R{i}', f'G{i}', f'B{i}'])
+
+    all_rows = []
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+
+    total_runs = len(subdirs)
+    run_count = 0
+
+    for run_dir in subdirs:
+        run_count += 1
+        status_text.text(f"Processing {run_dir} ({run_count}/{total_runs})...")
+        run_path = os.path.join(root_dir, run_dir)
+        csv_path = os.path.join(run_path, "dataset.csv")
+        
+        if not os.path.exists(csv_path):
+            continue
+            
+        df = pd.read_csv(csv_path)
+        df.columns = [c.strip() for c in df.columns]
+        img_col = next((c for c in df.columns if any(x in c.lower() for x in ["rgb", "image", "path"])), None)
+        if img_col is None:
+            continue
+
+        for idx, row in df.iterrows():
+            rgb_path = row[img_col] if img_col in row and pd.notna(row[img_col]) else None
+            if not rgb_path:
+                continue
+
+            full_img_path = resolve_image_path(run_path, rgb_path)
+            if not os.path.exists(full_img_path):
+                continue
+
+            try:
+                img = Image.open(full_img_path).convert('RGB')
+                if img.size != (width, height):
+                    continue
+                pixels = [str(val) for pixel in img.getdata() for val in pixel]
+
+                data_row = [
+                    str(row.get("timestamp", "")),
+                    str(row.get("steer_us", "")),
+                    str(row.get("throttle_us", "")),
+                    str(row.get("steer_norm", 0)),
+                    str(row.get("throttle_norm", 0)),
+                    str(row.get("depth_front", ""))
+                ] + pixels
+
+                all_rows.append(data_row)
+            except Exception as e:
+                st.warning(f"Error reading image {full_img_path}: {e}")
+
+        progress_bar.progress(run_count / total_runs)
+
+    status_text.text("Writing combined_dataset.csv...")
+    with open(output_csv, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(header)
+        writer.writerows(all_rows)
+
+    progress_bar.empty()
+    status_text.empty()
+    st.success(f"Combined dataset created!\nSaved to: `{output_csv}`\nTotal frames: {len(all_rows)}")
+
+# -------------------------
+# (Rest of helpers unchanged: CSV load, old format, delete, etc.)
 # -------------------------
 def is_csv_folder(path: str) -> bool:
     return os.path.isfile(os.path.join(path, "dataset.csv"))
@@ -99,9 +210,6 @@ def delete_csv_frame(df: pd.DataFrame, csv_path: str, idx: int, folder: str):
     df.to_csv(csv_path, index=False)
     return df
 
-# -------------------------
-# Old Format Helpers
-# -------------------------
 def load_old_frame(folder: str, idx: int):
     img_p = os.path.join(folder, f"{idx}.jpg")
     json_p = os.path.join(folder, f"{idx}.json")
@@ -128,7 +236,7 @@ def old_frame_count(folder: str):
     return len([f for f in os.listdir(folder) if f.endswith(".jpg")])
 
 # -------------------------
-# Main App
+# Main UI
 # -------------------------
 st.title("RC Car Dataset Viewer & Cleaner")
 
@@ -138,8 +246,15 @@ root_folder = st.text_input(
 )
 
 if not root_folder or not os.path.isdir(root_folder):
-    st.info("Enter a valid path to continue.")
+    st.info("Enter a valid folder path.")
     st.stop()
+
+# NEW: Create Combined CSV Button
+st.markdown("### Create Training Dataset")
+if st.button("Create combined_dataset.csv (pixel-flattened)", type="primary", use_container_width=True):
+    create_combined_csv(root_folder)
+
+st.markdown("---")
 
 folders = sorted([d for d in os.listdir(root_folder)
                   if os.path.isdir(os.path.join(root_folder, d))])
@@ -156,9 +271,9 @@ if st.session_state.current_folder != selected:
 
 is_csv = is_csv_folder(folder_path)
 
-# ========================
-# CSV Format
-# ========================
+# [Rest of viewer code — unchanged from last working version]
+# (CSV branch + old format branch with fixed thumbnails)
+
 if is_csv:
     df, csv_path = load_csv_dataset(folder_path)
     if df is None:
@@ -167,7 +282,6 @@ if is_csv:
     total = len(df)
     img_col = find_image_column(df)
 
-    # Bulk cleanup
     st.markdown("### Bulk Cleanup")
     if "throttle_norm" in df.columns:
         if st.button("Remove all throttle_norm == 0 frames"):
@@ -178,7 +292,6 @@ if is_csv:
                 st.success(f"Removed {before - len(df)} frames → {len(df)} left")
                 st.rerun()
 
-    # Navigation
     c1, c2, c3 = st.columns([1, 2, 1])
     if c1.button("Previous", use_container_width=True):
         st.session_state.idx = max(0, st.session_state.idx - 1)
@@ -195,7 +308,6 @@ if is_csv:
     row = df.iloc[idx]
     img_path = resolve_image_path(folder_path, row[img_col]) if img_col else None
 
-    # Image + Info
     col_img, col_info = st.columns([4, 2])
     if img_path and os.path.exists(img_path):
         col_img.image(Image.open(img_path), caption=f"Frame {idx+1}/{total}", use_column_width=True)
@@ -220,7 +332,6 @@ if is_csv:
             st.session_state.idx = max(0, len(df)-1)
         st.rerun()
 
-    # FIXED Thumbnail Strip — columns created once
     st.markdown("### Thumbnail Strip (click to jump)")
     half = THUMB_WINDOW // 2
     start = max(0, idx - half)
@@ -228,27 +339,21 @@ if is_csv:
     if end - start < THUMB_WINDOW:
         start = max(0, end - THUMB_WINDOW)
 
-    thumb_cols = st.columns(THUMB_WINDOW)  # Create all columns first
-
+    thumb_cols = st.columns(THUMB_WINDOW)
     for i in range(THUMB_WINDOW):
         pos = start + i
         if pos >= total:
             thumb_cols[i].write("")
             continue
-
         path = resolve_image_path(folder_path, df.iloc[pos][img_col]) if img_col else None
         if path and os.path.exists(path):
             thumb_cols[i].image(Image.open(path).resize((130, 90)), use_column_width=True)
         else:
             thumb_cols[i].write("missing")
-
         if thumb_cols[i].button(str(pos), key=f"thumb_{pos}"):
             st.session_state.idx = pos
             st.rerun()
 
-# ========================
-# Old jpg+json Format
-# ========================
 else:
     total = old_frame_count(folder_path)
     if total == 0:
