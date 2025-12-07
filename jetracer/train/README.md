@@ -5,4 +5,8 @@ It will save the flattened RGB, IR (2 channels), and depth data (entire depth pi
 record_data2.py: 
 The first script was causing the XBOX Controller's inputs to be sent to the car with a 4-5 second delay due to the large amount of data being processed, even with only 2 FPS. This script only collects the RGB image along with the depth in front of camera float value in centimetres to reduce the amount of data being processed by the Jetson every second. Using this script will considerably reduce the input delay between the steering/acceleration controls from the XBOX Controller and the RC Car while collecting training data driving the car.
 
+record_data3.py: Utilizes the net_controller_client.py to read the controller via pygame when plugged into another computer and sends normalized axes over UDP to the Jetson Nano. This allows wireless recording of training data using the RC car.
+
+net_controller_client.py: Install Pygame ```pip install pygame``` and run this script on the computer which you want to have the XBOX Controller plugged into to control the RC Car. Reads the controller via pygame and sends normalized axes over UDP to the Jetson Nano. Jetson IP and port must be configured in script or environment variables.
+
 realsense_full.py: Library with functions that can be used by the record scripts to interact with the Intel Realsense camera to obtain RGB image/IR image/depth data.
