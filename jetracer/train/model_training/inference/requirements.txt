@@ -1,0 +1,9 @@
+# These are the package versions used on the Jetson Nano when running the models. 
+# Some packages were built from wheels and not downloaded from pip. .sh build scripts used are in the repo.
+numpy==1.13.3
+opencv-python==3.2.0.8          # cv2 3.2.0 comes from this old opencv-python wheel
+torch==1.10.0
+torchvision==0.11.0a0+fa347eb
+torch2trt==0.5.0
+pyrealsense2==2.55.1
+smbus2==0.5.0
