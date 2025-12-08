@@ -1,3 +1,4 @@
+# Augmentation script that performs augmentations on the images in the dataset using the CPU.
 import pandas as pd
 import numpy as np
 import cv2
