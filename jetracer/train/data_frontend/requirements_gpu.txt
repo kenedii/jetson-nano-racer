@@ -1,4 +1,5 @@
 # These Python dependencies are required to run the GPU optimized data augmentation script, 'augment_data_gpu.py'
+# pip install -r requirements_gpu.txt
 --pre
 
 # Install torch for CUDA 12.9, change if your machine is not CUDA 12.9 compatible
