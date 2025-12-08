@@ -1,0 +1,14 @@
+# These Python dependencies are required to run the GPU optimized data augmentation script, 'augment_data_gpu.py'
+--pre
+
+# Install torch for CUDA 12.9, change if your machine is not CUDA 12.9 compatible
+--index-url https://download.pytorch.org/whl/nightly/cu129
+torch==2.10.0.dev20251206+cu129
+
+# torchvision and torchaudio are not yet available for cu129,
+# so install the latest compatible versions for CUDA 12.6
+--index-url https://download.pytorch.org/whl/nightly/cu126
+torchvision==0.25.0.dev20251206+cu126
+torchaudio==2.10.0.dev20251206+cu126
+kornia==0.8.2
+tqdm==4.67.1
