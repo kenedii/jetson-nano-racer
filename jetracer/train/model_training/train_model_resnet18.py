@@ -20,10 +20,10 @@ DATASET_PATH = 'combined_augmented_dataset.csv'   # Change this as needed
 IMG_HEIGHT = 120
 IMG_WIDTH = 160
 NUM_PIXELS = IMG_HEIGHT * IMG_WIDTH
-BATCH_SIZE = 32
-NUM_EPOCHS = 50
+BATCH_SIZE = 64
+NUM_EPOCHS = 64
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-VRAM_ALLOCATION = 0.5
+VRAM_ALLOCATION = 0.6
 
 # Optional: limit VRAM usage 
 if torch.cuda.is_available():
@@ -34,9 +34,6 @@ os.makedirs(SAVE_DIR, exist_ok=True)
 
 # RGB column names: R1, G1, B1, R2, G2, B2, ...
 RGB_COLUMNS = [f'{c}{i}' for i in range(1, NUM_PIXELS + 1) for c in ['R', 'G', 'B']]
-
-# Loss weights: steering is 5× more important
-LOSS_WEIGHTS = torch.tensor([5.0, 1.0], device=DEVICE)  # [steer_norm, throttle_norm]
 
 # ==================== LOGGING SETUP ====================
 class Tee:
@@ -67,8 +64,7 @@ if torch.cuda.is_available():
     print(f"GPU Memory          : {props.total_memory / 1e9:.1f} GB")
 print(f"Batch Size          : {BATCH_SIZE}")
 print(f"Epochs              : {NUM_EPOCHS}")
-print(f"Targets             : steer_norm, throttle_norm")
-print(f"Loss Weighting      : Steering ×5 | Throttle ×1")
+print(f"Targets             : steer_norm")
 print(f"Output Activation   : Tanh() → [-1, 1]")
 print("="*65 + "\n")
 
@@ -87,7 +83,7 @@ class CustomDataset(Dataset):
         self.images = np.array(images, dtype=np.float32)
         
         # Only normalized targets
-        self.targets = self.df[['steer_norm', 'throttle_norm']].values.astype(np.float32)
+        self.targets = self.df[['steer_norm']].values.astype(np.float32)
     
     def __len__(self):
         return len(self.df)
@@ -130,7 +126,7 @@ class ControlModel(nn.Module):
             nn.Linear(256, 128),
             nn.ReLU(inplace=True),
             nn.Dropout(0.3),
-            nn.Linear(128, 2),
+            nn.Linear(128, 1),
             nn.Tanh()  # Clamps output to [-1, 1]
         )
     
@@ -152,7 +148,7 @@ print(f"Model architecture saved → {arch_path}\n")
 
 # Loss & optimizer
 def weighted_mse_loss(pred, target):
-    return torch.mean(LOSS_WEIGHTS * (pred - target) ** 2)
+    return torch.mean((pred - target) ** 2)
 
 criterion = weighted_mse_loss
 optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)
@@ -201,7 +197,6 @@ for epoch in range(1, NUM_EPOCHS + 1):
     val_mae = mean_absolute_error(targets, preds)
     val_r2 = r2_score(targets, preds, multioutput='uniform_average')
     steer_mae = mean_absolute_error(targets[:,0], preds[:,0])
-    throttle_mae = mean_absolute_error(targets[:,1], preds[:,1])
     
     epoch_time = time.time() - epoch_start
     
@@ -214,7 +209,7 @@ for epoch in range(1, NUM_EPOCHS + 1):
     
     print(f"\nEpoch {epoch:02d} | Time: {epoch_time:.1f}s")
     print(f"   Train Loss : {avg_train_loss:.5f}")
-    print(f"   Val MAE    : {val_mae:.4f}  (Steer: {steer_mae:.4f} | Throttle: {throttle_mae:.4f})")
+    print(f"   Val MAE    : {val_mae:.4f}  (Steer: {steer_mae:.4f})")
     print(f"   Val R²     : {val_r2:.4f}")
     
     scheduler.step(val_mae)
@@ -242,7 +237,6 @@ print(f"Best Val MAE        : {best_val_mae:.4f}")
 print(f"Final Val MAE       : {val_mae:.4f}")
 print(f"Final Val R²        : {val_r2:.4f}")
 print(f"Final Steer MAE     : {steer_mae:.4f}")
-print(f"Final Throttle MAE  : {throttle_mae:.4f}")
 
 # Save history & plot
 pd.DataFrame(history).to_csv('training_history_normalized.csv', index=False)
