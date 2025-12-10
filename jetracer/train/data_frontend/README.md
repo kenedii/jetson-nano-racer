@@ -1,6 +1,6 @@
 app.py:
 
-Easily manage your training data with this Streamlit app to browse multiple RC car run folders, view frames, visualize controls, and delete bad frames (removes image file + CSV row). Also has a Model Prediction page where you can upload a model weights file, an image to predict, and specify the resnet architecture and receive the model's prediction for that image.
+Easily manage your training data with this Streamlit app to browse multiple RC car run folders, view frames, visualize controls, and delete bad frames (removes image file + CSV row). Also has a Model Prediction page where you can upload a model weights file, an image to predict, and specify the resnet architecture and receive the model's prediction for that image. Install dependencies using requirements.txt.
 
 Run: ```streamlit run app.py```
 
@@ -11,6 +11,6 @@ dataset_csv_creator.py: Takes a folder filled with runs recorded while driving t
 
 augment_data.py: Performs several augmentations on the data individually, as well as a "combination augmentation" step which combines several augmentations with 25-75% intensity. Specify the dataset csv.
 
-augment_data_gpu.py: Same augmentations as augment_data.py but different approach, applies augmentations in batches on GPU using Pytorch and Kornia to leverage the GPU to make augmentations faster.
+augment_data_gpu.py: Same augmentations as augment_data.py but different approach, applies augmentations in batches on GPU using Pytorch and Kornia to leverage the GPU to make augmentations faster. Install dependencies using requirements_gpu.txt.
 
 Dockerfile / docker-compose.yml available for containerizing frontend for easy deployment.
