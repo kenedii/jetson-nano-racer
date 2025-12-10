@@ -1,11 +1,18 @@
 # trt_optimize.py
-# Run this ONCE on your Jetson Nano to convert your trained model to TensorRT. 
-# Adjust PYTORCH_MODEL_PATH if needed.
+# Run this ONCE on your Jetson Nano to convert your trained model to TensorRT for faster inference. 
 
 import os
 import torch
 import torch.nn as nn
 from torchvision import models
+
+# ------------------------------------------------------------
+# USER CONFIG
+# ------------------------------------------------------------
+MODEL_ARCHITECTURE = "resnet18"   # Options: "resnet18", "resnet34", "resnet50", "resnet101"
+# Paths
+PYTORCH_MODEL_PATH = "checkpoints/model_5_resnet18/best_model.pth"
+TRT_MODEL_PATH     = "checkpoints/model_5_resnet18/best_model_trt.pth"
 
 # ------------------------------------------------------------
 # 1. Install torch2trt automatically if not present
@@ -21,17 +28,32 @@ except ImportError:
     print("[OK] torch2trt installed successfully!")
 
 # ------------------------------------------------------------
-# 2. Exact same model class as in your training script
+# 2. Exact same model class as in your training script — now dynamic
 # ------------------------------------------------------------
 class ControlModel(nn.Module):
     def __init__(self):
         super().__init__()
-        # Use pretrained=False here — weights will be loaded from your checkpoint
-        backbone = models.resnet18(pretrained=False)
+
+        # Select backbone and feature size based on architecture
+        if MODEL_ARCHITECTURE == "resnet18":
+            backbone = models.resnet18(pretrained=False)
+            feature_dim = 512
+        elif MODEL_ARCHITECTURE == "resnet34":
+            backbone = models.resnet34(pretrained=False)
+            feature_dim = 512
+        elif MODEL_ARCHITECTURE == "resnet50":
+            backbone = models.resnet50(pretrained=False)
+            feature_dim = 2048
+        elif MODEL_ARCHITECTURE == "resnet101":
+            backbone = models.resnet101(pretrained=False)
+            feature_dim = 2048
+        else:
+            raise ValueError("Unsupported MODEL_ARCHITECTURE. Choose: resnet18, resnet34, resnet50, resnet101")
+
         self.features = nn.Sequential(*list(backbone.children())[:-2])
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         self.head = nn.Sequential(
-            nn.Linear(512, 256),
+            nn.Linear(feature_dim, 256),
             nn.ReLU(inplace=True),
             nn.Dropout(0.4),
             nn.Linear(256, 128),
@@ -48,17 +70,11 @@ class ControlModel(nn.Module):
         return self.head(x)
 
 # ------------------------------------------------------------
-# 3. Paths — change only if your folder structure is different
-# ------------------------------------------------------------
-PYTORCH_MODEL_PATH = "checkpoints/model_5_resnet18/best_model.pth"   # ← your trained model
-TRT_MODEL_PATH     = "checkpoints/model_5_resnet18/best_model_trt.pth"  # ← will be created
-
-# ------------------------------------------------------------
 # 4. Load model + weights
 # ------------------------------------------------------------
 device = torch.device("cuda")
 
-print(f"[INFO] Loading PyTorch model from: {PYTORCH_MODEL_PATH}")
+print(f"[INFO] Loading PyTorch model ({MODEL_ARCHITECTURE}) from: {PYTORCH_MODEL_PATH}")
 model = ControlModel().to(device)
 
 # Handle both plain state_dict and dict with 'model_state_dict'
