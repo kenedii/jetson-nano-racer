@@ -24,7 +24,7 @@ except ImportError:
     print("[WARNING] torch2trt not found → will be very slow")
 
 # ------------------- CONFIGURATION -------------------
-MODEL_ARCHITECTURE = 'resnet18'  # Set to 'resnet18' or 'resnet101'
+MODEL_ARCHITECTURE = 'resnet18'  # Set to 'resnet18', 'resnet34', 'resnet50', or 'resnet101'
 MODEL_TRT_PATH   = f"checkpoints/model_5_{MODEL_ARCHITECTURE}/best_model_trt.pth"
 MODEL_PYTORCH_PATH = f"checkpoints/model_5_{MODEL_ARCHITECTURE}/best_model.pth"
 
@@ -104,6 +104,12 @@ def load_model():
             if MODEL_ARCHITECTURE == 'resnet18':
                 backbone = models.resnet18(pretrained=False)
                 feature_dim = 512
+            elif MODEL_ARCHITECTURE == 'resnet34':
+                backbone = models.resnet34(pretrained=False)
+                feature_dim = 512
+            elif MODEL_ARCHITECTURE == 'resnet50':
+                backbone = models.resnet50(pretrained=False)
+                feature_dim = 2048
             elif MODEL_ARCHITECTURE == 'resnet101':
                 backbone = models.resnet101(pretrained=False)
                 feature_dim = 2048
