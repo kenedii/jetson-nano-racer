@@ -1,5 +1,5 @@
-# run_autonomous_resnet18.py
-# Fully working autonomous drive script to run the resnet18 model for Jetson Nano + RealSense + LaTrax
+# run_autonomous_resnet.py
+# Fully working autonomous drive script to run the resnet model for Jetson Nano + RealSense + LaTrax
 # Uses TensorRT and correct PCA9685 control to move the car.
 # Will automatically default to using PyTorch to run the model if TensorRT can't be used.
 # Adjust MODEL_TRT_PATH or MODEL_PYTORCH_PATH if needed.
@@ -24,8 +24,9 @@ except ImportError:
     print("[WARNING] torch2trt not found → will be very slow")
 
 # ------------------- CONFIGURATION -------------------
-MODEL_TRT_PATH   = "checkpoints/model_5_resnet18/best_model_trt.pth"
-MODEL_PYTORCH_PATH = "checkpoints/model_5_resnet18/best_model.pth"
+MODEL_ARCHITECTURE = 'resnet18'  # Set to 'resnet18' or 'resnet101'
+MODEL_TRT_PATH   = f"checkpoints/model_5_{MODEL_ARCHITECTURE}/best_model_trt.pth"
+MODEL_PYTORCH_PATH = f"checkpoints/model_5_{MODEL_ARCHITECTURE}/best_model.pth"
 
 FIXED_THROTTLE_NORM = 0.22        # 0.20–0.25 works great
 STEERING_GAIN = 1.0
@@ -100,11 +101,18 @@ def load_model():
     class ControlModel(nn.Module):
         def __init__(self):
             super().__init__()
-            backbone = models.resnet18(pretrained=False)
+            if MODEL_ARCHITECTURE == 'resnet18':
+                backbone = models.resnet18(pretrained=False)
+                feature_dim = 512
+            elif MODEL_ARCHITECTURE == 'resnet101':
+                backbone = models.resnet101(pretrained=False)
+                feature_dim = 2048
+            else:
+                raise ValueError(f"Unsupported architecture: {MODEL_ARCHITECTURE}")
             self.features = nn.Sequential(*list(backbone.children())[:-2])
             self.avgpool = nn.AdaptiveAvgPool2d((1,1))
             self.head = nn.Sequential(
-                nn.Linear(512, 256), nn.ReLU(inplace=True), nn.Dropout(0.4),
+                nn.Linear(feature_dim, 256), nn.ReLU(inplace=True), nn.Dropout(0.4),
                 nn.Linear(256, 128), nn.ReLU(inplace=True), nn.Dropout(0.3),
                 nn.Linear(128, 1),   nn.Tanh()
             )
