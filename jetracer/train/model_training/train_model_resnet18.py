@@ -16,6 +16,7 @@ from tqdm import tqdm
 from datetime import timedelta
 
 # ==================== CONFIGURATION ====================
+MODEL_ARCHITECTURE = 'resnet101' # or 'resnet18', 'resnet50'
 DATASET_PATH = 'combined_augmented_dataset.csv'   # Change this as needed
 IMG_HEIGHT = 120
 IMG_WIDTH = 160
@@ -115,12 +116,23 @@ print(f"Test batches        : {len(test_loader)}\n")
 class ControlModel(nn.Module):
     def __init__(self):
         super().__init__()
-        backbone = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
+        if MODEL_ARCHITECTURE == 'resnet18':
+            backbone = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
+            input_size = 512
+        elif MODEL_ARCHITECTURE == 'resnet101':
+            backbone = models.resnet101(weights=models.ResNet101_Weights.DEFAULT)
+            input_size = 2048
+        elif MODEL_ARCHITECTURE == 'resnet50':
+            backbone = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)
+            input_size = 2048
+        elif MODEL_ARCHITECTURE == 'resnet34':
+            backbone = models.resnet34(weights=models.ResNet34_Weights.DEFAULT)
+            input_size = 512
         self.features = nn.Sequential(*list(backbone.children())[:-2])
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         
         self.head = nn.Sequential(
-            nn.Linear(512, 256),
+            nn.Linear(input_size, 256),
             nn.ReLU(inplace=True),
             nn.Dropout(0.4),
             nn.Linear(256, 128),
