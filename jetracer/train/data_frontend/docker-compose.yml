@@ -1,0 +1,17 @@
+# docker-compose.yml
+version: "3.9"
+services:
+  jetracer:
+    build: .
+    ports:
+      - "8501:8501"   # Streamlit
+      - "8000:8000"   # FastAPI
+    environment:
+      - RUN_API=true   # ← Set to "false" or comment out to disable API
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
