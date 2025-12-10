@@ -16,7 +16,7 @@ from tqdm import tqdm
 from datetime import timedelta
 
 # ==================== CONFIGURATION ====================
-MODEL_ARCHITECTURE = 'resnet101' # or 'resnet18', 'resnet50'
+MODEL_ARCHITECTURE = 'resnet101' # e.g. 'resnet18', 'resnet50'
 DATASET_PATH = 'combined_augmented_dataset.csv'   # Change this as needed
 IMG_HEIGHT = 120
 IMG_WIDTH = 160
