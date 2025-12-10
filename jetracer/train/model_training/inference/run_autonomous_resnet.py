@@ -3,6 +3,7 @@
 # Uses TensorRT and correct PCA9685 control to move the car.
 # Will automatically default to using PyTorch to run the model if TensorRT can't be used.
 # Adjust MODEL_TRT_PATH or MODEL_PYTORCH_PATH if needed.
+# FIXED: Added ESC arming sequence for LaTrax/HobbyWing ESC to ensure it responds to throttle.
 
 import os
 import cv2
@@ -25,10 +26,10 @@ except ImportError:
 
 # ------------------- CONFIGURATION -------------------
 MODEL_ARCHITECTURE = 'resnet18'  # Set to 'resnet18', 'resnet34', 'resnet50', or 'resnet101'
-MODEL_TRT_PATH   = f"checkpoints/model_5_{MODEL_ARCHITECTURE}/best_model_trt.pth"
-MODEL_PYTORCH_PATH = f"checkpoints/model_5_{MODEL_ARCHITECTURE}/best_model.pth"
+MODEL_TRT_PATH   = f"checkpoints/model_5_resnet18/best_model_trt.pth"
+MODEL_PYTORCH_PATH = f"checkpoints/model_5_resnet18/best_model.pth"
 
-FIXED_THROTTLE_NORM = 0.22        # 0.20–0.25 works great
+FIXED_THROTTLE_NORM = 1.0        # Set to 1.0 for full throttle; adjust lower if too fast
 STEERING_GAIN = 1.0
 STEERING_OFFSET = 0.0
 
@@ -172,6 +173,17 @@ def preprocess(frame):
     tensor = torch.from_numpy(img).float().div(255.0)
     return tensor.unsqueeze(0).to(DEVICE)
 
+# ------------------- ARM ESC -------------------
+def arm_esc(pca):
+    print("[ESC] Arming sequence...")
+    pca.set_us(THROTTLE_CHANNEL, THROTTLE_CENTER)  # Neutral
+    time.sleep(3.0)  # Wait for beeps
+    pca.set_us(THROTTLE_CHANNEL, THROTTLE_MIN)     # Full reverse for calibration
+    time.sleep(2.0)  # Beep confirmation
+    pca.set_us(THROTTLE_CHANNEL, THROTTLE_CENTER)  # Back to neutral
+    time.sleep(2.0)  # Ready
+    print("[ESC] Armed!")
+
 # ------------------- MAIN -------------------
 def main():
     print("\n" + "="*60)
@@ -184,6 +196,9 @@ def main():
     pca.set_us(THROTTLE_CHANNEL, THROTTLE_CENTER)
     time.sleep(1.0)
 
+    # Arm ESC
+    arm_esc(pca)
+
     start_camera()
     model = load_model()
 
@@ -194,7 +209,7 @@ def main():
         model(dummy)
     print("Warm-up complete!\n")
 
-    # Calculate throttle pulse
+    # Calculate throttle pulse (full power at 1.0)
     throttle_us = THROTTLE_CENTER + int(FIXED_THROTTLE_NORM * (THROTTLE_MAX - THROTTLE_CENTER))
     throttle_us = np.clip(throttle_us, THROTTLE_MIN, THROTTLE_MAX)
 
@@ -203,7 +218,7 @@ def main():
     print("Press Ctrl+C to stop\n")
 
     pca.set_us(THROTTLE_CHANNEL, throttle_us)
-    time.sleep(1.5)  # Let ESC arm
+    time.sleep(1.5)  # Let ESC respond
 
     frame_count = infer_count = 0
     last_report = time.time()
