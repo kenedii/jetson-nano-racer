@@ -156,6 +156,6 @@ def show():
 
     st.markdown("---")
     st.info("""
-    **Tip:** Use the FastAPI version (`api_predict_upload.py`) from earlier for remote/server deployment.  
-    Local mode works great on your Jetson Nano or laptop with GPU.
+    **Tip:** Use the FastAPI version (`api_predict_upload.py`)for remote/server deployment.  
+    Local mode works great on Jetson Nano or laptop with GPU.
     """)
