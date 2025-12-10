@@ -1,3 +1,7 @@
+# adjust if your GPU is not CUDA 12.6 compatible
+--index-url https://download.pytorch.org/whl/nightly/cu126
+--extra-index-url https://pypi.org/simple
+
 fastapi==0.124.0
 uvicorn==0.38.0
 torch==2.10.0.dev20251207+cu126
