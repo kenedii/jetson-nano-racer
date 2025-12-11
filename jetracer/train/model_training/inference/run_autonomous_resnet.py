@@ -3,6 +3,8 @@
 # Uses TensorRT and correct PCA9685 control to move the car.
 # Will automatically default to using PyTorch to run the model if TensorRT can't be used.
 # Adjust MODEL_TRT_PATH or MODEL_PYTORCH_PATH if needed.
+# If it does not work, run sudo bash -c 'i2cset -y 1 0x40 0x00 0x21; i2cset -y 1 0x40 0xFE 0x65; i2cset -y 1 0x40 0x00 0xA1; i2cset -y 1 0x40 0x08 0x00 0x06 && sleep 2; i2cset -y 1 0x40 0x08 0x00 0x09 && sleep 2; i2cset -y 1 0x40 0x08 0x00 0x06 && sleep 1; i2cset -y 1 0x40 0x0C 0x00 0x09 && sleep 4; i2cset -y 1 0x40 0x0C 0x00 0x06; echo "FINISHED"'
+# first to warm-up PCA9685
 
 import os
 import cv2
