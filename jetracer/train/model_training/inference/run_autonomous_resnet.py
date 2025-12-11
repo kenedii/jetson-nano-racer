@@ -16,6 +16,33 @@ import sys
 import subprocess
 from smbus2 import SMBus
 
+
+
+# ------------------- TRY TO LOAD TensorRT -------------------
+try:
+    from torch2trt import TRTModule
+    HAS_TRT = True
+    print("[OK] TensorRT support loaded")
+except ImportError:
+    HAS_TRT = False
+    print("[WARNING] torch2trt not found → will be very slow")
+
+# ------------------- CONFIGURATION -------------------
+MODEL_ARCHITECTURE = 'resnet101'  # Set to 'resnet18', 'resnet34', 'resnet50', or 'resnet101'
+MODEL_TRT_PATH   = f"checkpoints/model_8_resnet101/best_model_trt.pth"
+MODEL_PYTORCH_PATH = f"checkpoints/model_8_resnet101/best_model.pth"
+
+FIXED_THROTTLE_NORM = 0.3        # Set to 1.0 for full throttle; adjust lower if too fast
+STEERING_GAIN = 1.0
+STEERING_OFFSET = 0.0
+
+TARGET_FPS = 15
+FRAME_SKIP = 1                    # With TRT you can do every frame!
+
+CAMERA_WIDTH = 848
+CAMERA_HEIGHT = 480
+CAMERA_FPS = 30
+
 # ------------------- PCA9685 RAW INIT (ADDED) -------------------
 def init_pca9685_raw():
     """
@@ -50,32 +77,6 @@ def init_pca9685_raw():
             subprocess.run(["sudo"] + cmd, check=False)
 
     print("[INIT] PCA9685 warm-up complete!\n")
-
-
-# ------------------- TRY TO LOAD TensorRT -------------------
-try:
-    from torch2trt import TRTModule
-    HAS_TRT = True
-    print("[OK] TensorRT support loaded")
-except ImportError:
-    HAS_TRT = False
-    print("[WARNING] torch2trt not found → will be very slow")
-
-# ------------------- CONFIGURATION -------------------
-MODEL_ARCHITECTURE = 'resnet18'  # Set to 'resnet18', 'resnet34', 'resnet50', or 'resnet101'
-MODEL_TRT_PATH   = f"checkpoints/model_5_resnet18/best_model_trt.pth"
-MODEL_PYTORCH_PATH = f"checkpoints/model_5_resnet18/best_model.pth"
-
-FIXED_THROTTLE_NORM = 1.0        # Set to 1.0 for full throttle; adjust lower if too fast
-STEERING_GAIN = 1.0
-STEERING_OFFSET = 0.0
-
-TARGET_FPS = 15
-FRAME_SKIP = 1                    # With TRT you can do every frame!
-
-CAMERA_WIDTH = 848
-CAMERA_HEIGHT = 480
-CAMERA_FPS = 30
 
 # ------------------- PCA9685 (CORRECTED & TESTED) -------------------
 class PCA9685:
