@@ -13,7 +13,44 @@ import torch
 import time
 import signal
 import sys
+import subprocess
 from smbus2 import SMBus
+
+# ------------------- PCA9685 RAW INIT (ADDED) -------------------
+def init_pca9685_raw():
+    """
+    Runs the i2cset initialization sequence you normally paste manually.
+    Ensures PCA9685 is in correct state after Jetson reboot.
+    """
+    print("[INIT] Running raw i2c warm-up init for PCA9685...")
+
+    cmds = [
+        ["i2cset", "-y", "1", "0x40", "0x00", "0x21"],
+        ["i2cset", "-y", "1", "0x40", "0xFE", "0x65"],
+        ["i2cset", "-y", "1", "0x40", "0x00", "0xA1"],
+
+        # Steering (channel 0)
+        ["i2cset", "-y", "1", "0x40", "0x08", "0x00", "0x06"],
+        ["sleep", "2"],
+        ["i2cset", "-y", "1", "0x40", "0x08", "0x00", "0x09"],
+        ["sleep", "2"],
+        ["i2cset", "-y", "1", "0x40", "0x08", "0x00", "0x06"],
+        ["sleep", "1"],
+
+        # Throttle (channel 1)
+        ["i2cset", "-y", "1", "0x40", "0x0C", "0x00", "0x09"],
+        ["sleep", "4"],
+        ["i2cset", "-y", "1", "0x40", "0x0C", "0x00", "0x06"]
+    ]
+
+    for cmd in cmds:
+        if cmd[0] == "sleep":
+            time.sleep(float(cmd[1]))
+        else:
+            subprocess.run(["sudo"] + cmd, check=False)
+
+    print("[INIT] PCA9685 warm-up complete!\n")
+
 
 # ------------------- TRY TO LOAD TensorRT -------------------
 try:
@@ -36,7 +73,7 @@ STEERING_OFFSET = 0.0
 TARGET_FPS = 15
 FRAME_SKIP = 1                    # With TRT you can do every frame!
 
-CAMERA_WIDTH = 848                # Good compromise: fast + accurate
+CAMERA_WIDTH = 848
 CAMERA_HEIGHT = 480
 CAMERA_FPS = 30
 
@@ -55,12 +92,12 @@ class PCA9685:
         prescale = int(prescaleval + 0.5)
 
         oldmode = self.bus.read_byte_data(self.address, 0x00)
-        newmode = (oldmode & 0x7F) | 0x10                    # sleep
-        self.bus.write_byte_data(self.address, 0x00, newmode)  # go to sleep
-        self.bus.write_byte_data(self.address, 0xFE, prescale)  # set prescale
-        self.bus.write_byte_data(self.address, 0x00, oldmode)   # restore
+        newmode = (oldmode & 0x7F) | 0x10
+        self.bus.write_byte_data(self.address, 0x00, newmode)
+        self.bus.write_byte_data(self.address, 0xFE, prescale)
+        self.bus.write_byte_data(self.address, 0x00, oldmode)
         time.sleep(0.005)
-        self.bus.write_byte_data(self.address, 0x00, oldmode | 0x80)  # restart
+        self.bus.write_byte_data(self.address, 0x00, oldmode | 0x80)
 
     def set_pwm(self, channel, on, off):
         self.bus.write_byte_data(self.address, 0x06 + 4*channel, on & 0xFF)
@@ -69,11 +106,10 @@ class PCA9685:
         self.bus.write_byte_data(self.address, 0x09 + 4*channel, off >> 8)
 
     def set_us(self, channel, microseconds):
-        """Convert microseconds → correct 12-bit off value at 50Hz"""
         pulse = int(microseconds * 4096 * 50 / 1000000 + 0.5)
         self.set_pwm(channel, 0, pulse)
 
-# ------------------- HARDWARE LIMITS (match your Xbox script) -------------------
+# ------------------- HARDWARE LIMITS -------------------
 STEERING_CHANNEL = 0
 THROTTLE_CHANNEL = 1
 
@@ -82,10 +118,10 @@ STEERING_MIN    = 1000
 STEERING_MAX    = 2000
 
 THROTTLE_CENTER = 1500
-THROTTLE_MIN    = 1200   # Don't go below ~1200 or ESC beeps
+THROTTLE_MIN    = 1200
 THROTTLE_MAX    = 1900
 
-# ------------------- LOAD MODEL (TRT first) -------------------
+# ------------------- LOAD MODEL -------------------
 DEVICE = torch.device("cuda")
 
 def load_model():
@@ -116,13 +152,15 @@ def load_model():
                 feature_dim = 2048
             else:
                 raise ValueError(f"Unsupported architecture: {MODEL_ARCHITECTURE}")
+
             self.features = nn.Sequential(*list(backbone.children())[:-2])
             self.avgpool = nn.AdaptiveAvgPool2d((1,1))
             self.head = nn.Sequential(
                 nn.Linear(feature_dim, 256), nn.ReLU(inplace=True), nn.Dropout(0.4),
                 nn.Linear(256, 128), nn.ReLU(inplace=True), nn.Dropout(0.3),
-                nn.Linear(128, 1),   nn.Tanh()
+                nn.Linear(128, 1), nn.Tanh()
             )
+
         def forward(self, x):
             x = self.features(x)
             x = self.avgpool(x)
@@ -145,11 +183,9 @@ def start_camera():
     pipeline = rs.pipeline()
     config = rs.config()
     config.enable_stream(rs.stream.color, CAMERA_WIDTH, CAMERA_HEIGHT, rs.format.rgb8, CAMERA_FPS)
-
     try:
         profile = pipeline.start(config)
         align = rs.align(rs.stream.color)
-        # Warm up
         for _ in range(15):
             pipeline.wait_for_frames()
         print(f"[Camera] {CAMERA_WIDTH}x{CAMERA_HEIGHT} @ {CAMERA_FPS} FPS → OK")
@@ -169,19 +205,19 @@ def get_frame():
 # ------------------- FAST PREPROCESS -------------------
 def preprocess(frame):
     img = cv2.resize(frame, (160, 120))
-    img = img.transpose(2, 0, 1)                  # HWC → CHW
+    img = img.transpose(2, 0, 1)
     tensor = torch.from_numpy(img).float().div(255.0)
     return tensor.unsqueeze(0).to(DEVICE)
 
 # ------------------- ARM ESC -------------------
 def arm_esc(pca):
     print("[ESC] Arming sequence...")
-    pca.set_us(THROTTLE_CHANNEL, THROTTLE_CENTER)  # Neutral
-    time.sleep(3.0)  # Wait for beeps
-    pca.set_us(THROTTLE_CHANNEL, THROTTLE_MIN)     # Full reverse for calibration
-    time.sleep(2.0)  # Beep confirmation
-    pca.set_us(THROTTLE_CHANNEL, THROTTLE_CENTER)  # Back to neutral
-    time.sleep(2.0)  # Ready
+    pca.set_us(THROTTLE_CHANNEL, THROTTLE_CENTER)
+    time.sleep(3.0)
+    pca.set_us(THROTTLE_CHANNEL, THROTTLE_MIN)
+    time.sleep(2.0)
+    pca.set_us(THROTTLE_CHANNEL, THROTTLE_CENTER)
+    time.sleep(2.0)
     print("[ESC] Armed!")
 
 # ------------------- MAIN -------------------
@@ -189,6 +225,9 @@ def main():
     print("\n" + "="*60)
     print("   JETRACER AUTONOMOUS DRIVE – TENSORRT + WORKING PCA9685")
     print("="*60 + "\n")
+
+    # ------------------ ADDED LINE: AUTO INIT PCA9685 ------------------
+    init_pca9685_raw()
 
     # Init hardware
     pca = PCA9685()
@@ -202,14 +241,12 @@ def main():
     start_camera()
     model = load_model()
 
-    # Warm-up model (critical for TRT first-run timing)
     print("Warming up model...")
     dummy = torch.ones((1, 3, 120, 160), device=DEVICE)
     for _ in range(10):
         model(dummy)
     print("Warm-up complete!\n")
 
-    # Calculate throttle pulse (full power at 1.0)
     throttle_us = THROTTLE_CENTER + int(FIXED_THROTTLE_NORM * (THROTTLE_MAX - THROTTLE_CENTER))
     throttle_us = np.clip(throttle_us, THROTTLE_MIN, THROTTLE_MAX)
 
@@ -218,7 +255,7 @@ def main():
     print("Press Ctrl+C to stop\n")
 
     pca.set_us(THROTTLE_CHANNEL, throttle_us)
-    time.sleep(1.5)  # Let ESC respond
+    time.sleep(1.5)
 
     frame_count = infer_count = 0
     last_report = time.time()
@@ -254,10 +291,8 @@ def main():
                 pca.set_us(STEERING_CHANNEL, steer_us)
                 infer_count += 1
 
-            # Always keep throttle alive
             pca.set_us(THROTTLE_CHANNEL, throttle_us)
 
-            # Stats
             now = time.time()
             if now - last_report > 2.0:
                 cam_fps = frame_count / (now - last_report)
