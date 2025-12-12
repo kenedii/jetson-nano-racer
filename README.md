@@ -34,9 +34,9 @@ PCA9685 servo driver to steer the car.
 - ResNet-based steering model (PyTorch + TensorRT)
 - Autonomous lane following on indoor track
 - RealSense center-depth measurement for safety / debugging
-- REST API for live predictions (`deployment/api_server.py`)
-- Streamlit demo UI (`deployment/streamlit_app.py`)
-- Dockerfile for Jetson deployment (`deployment/Dockerfile`)
+- REST API for live predictions
+- Streamlit demo UI
+- Dockerfile for Streamlit deployment
 
 ## 1. Setup
 
